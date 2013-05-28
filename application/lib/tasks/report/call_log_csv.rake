@@ -1,11 +1,14 @@
 require 'csv'
 require 'delegate'
+require 'pry'
 
 F_DATE = '%Y-%m-%d'
 F_TIME = '%H:%M:%S'
 F_DATETIME = '%Y-%m-%d %H:%M:%S'
 REPORTS_DIR = File.join(Rails.root, 'tmp', 'reports')
 
+FILENAME_DATE_FORMAT = '%B-%Y'
+CALL_TYPES_FOR_ENCOUNTER_REPORTS = [0,3]
 
 namespace :report do
   desc "call log CSV reports"
@@ -20,7 +23,7 @@ namespace :report do
       end
     end
 
-    cond = []
+    cond = [ ['call_type IN (?)', CALL_TYPES_FOR_ENCOUNTER_REPORTS] ]
     cond << ['start_time >= ?', DateTime.parse(range_start)] if range_start
     cond << ['end_time < ?', DateTime.parse(range_end)] if range_end
     conditions = [cond.map(&:first).join(' AND '), *cond.map(&:last)]
@@ -29,15 +32,13 @@ namespace :report do
     Dir.chdir(REPORTS_DIR)
 
     reports = [
-      CallLogCSV.new('call_log-%Y-%m-%d.csv'),
-      RegistrationCSV.new('registrations-%Y-%m-%d.csv'),
-      UpdateOutcomesCSV.new('update_outcomes-%Y-%m-%d.csv'),
-      ChildHealthSymptomsCSV.new('child_health_symptoms-%Y-%m-%d.csv'),
-      MaternalHealthSymptomsCSV.new('maternal_health_symptoms-%Y-%m-%d.csv'),
-      TipsAndRemindersCSV.new('tips_and_reminders-%Y-%m-%d.csv'),
-      OtherCallsCSV.new('other_calls-%Y-%m-%d.csv'),
+      RegistrationCSV.new("All-Callers"),
+      UpdateOutcomesCSV.new('Outcomes'),
+      ChildHealthSymptomsCSV.new("Child-Health"),
+      MaternalHealthSymptomsCSV.new("Maternal-Health"),
+      TipsAndRemindersCSV.new("Tips-and-Reminders-Activity"),  #FIXME:  ensure this is monthly activity,  add ever-enrolled Participants separately.  (current enrollments from notifier)
+      OtherCallsCSV.new("Other-Calls"),
     ]
-
     CallLog.find(:all, :conditions => conditions).each do |call|
       fc = FlattenedCall.new(call)
       reports.each {|r| r.write(fc) }
@@ -48,7 +49,8 @@ end
 
 class FormattedCSV < SimpleDelegator
   def initialize(filename)
-    @csv = CSV.open(DateTime.now.strftime(filename), 'wb')
+    prev_month = (Date.today - 1.month).to_s(FILENAME_DATE_FORMAT)    
+    @csv = CSV.open("#{filename}-#{prev_month}.csv", 'wb')
     @col_defs = column_definitions # cache
     @record_delegator = self
 
@@ -57,16 +59,20 @@ class FormattedCSV < SimpleDelegator
 
   def [](key)
     fun = @col_defs[key]
-    case
-    when fun.nil? then self.send(methodize(key))
-    when fun.arity < 1 then fun.call()
-    else fun.call(self.send(methodize(key)))
+
+    begin
+      case
+      when fun.nil? then self.send(methodize(key))
+      when fun.arity < 1 then fun.call()
+      else fun.call(self.send(methodize(key)))
+      end
+    rescue
+      binding.pry
     end
   end
 
-  def include_if?(record)
-    # predicate returning whether record should be included in CSV
-    true
+  def has_encounter
+    false
   end
 
   def columns
@@ -78,7 +84,7 @@ class FormattedCSV < SimpleDelegator
   end
 
   def write(record)
-    return unless include_if?(record)
+    @record = record
     @record_delegator.__setobj__(record)
     @csv << columns.map {|c| @record_delegator[c] }
   end
@@ -86,20 +92,20 @@ end
 
 
 class EncounterCSV < FormattedCSV
-  def include_if?(record)
-    # only include if one or more encounters
-    record.encounters.any?
+  def has_encounter
+    @record.encounters.any?
   end
 
   def columns
-    [ 'CALL ID', 'NATIONAL ID', 'GENDER', 'DOB', 'VILLAGE', 'NEAREST HC',
-      'PREGNANCY STATUS', 'EXPECTED DUE DATE', 'CALL DATE'
+    [ 'CALL ID', 'CALL DROPPED', 'HAS ENCOUNTER', 'NATIONAL ID', 'GENDER', 'DOB', 'VILLAGE', 'NEAREST HC',
+      'PREGNANCY STATUS', 'EXPECTED DUE DATE', 'CALL DATE', 
     ]
   end
 
   def column_definitions
     { 'DOB'       => lambda {|v| v.try(:strftime, F_DATE) },
       'CALL DATE' => lambda { call_start.try(:strftime, F_DATE) },
+      'CALL DROPPED' => lambda { call_type == 3 },
     }
   end
 end
@@ -145,8 +151,8 @@ end
 
 
 class UpdateOutcomesCSV < EncounterCSV
-  def include_if?(record)
-    record.encounter_types.include?('UPDATE OUTCOME')
+  def has_encounter
+    @record.encounter_types.include?('UPDATE OUTCOME')
   end
 
   def columns
@@ -175,8 +181,8 @@ class ChildHealthSymptomsCSV < EncounterCSV
     'GROWTH MILESTONES', 'ACCESSING HEALTHCARE SERVICES'
   ]
 
-  def include_if?(record)
-    record.encounter_types.include?('CHILD HEALTH SYMPTOMS')
+  def has_encounter
+    @record.encounter_types.include?('CHILD HEALTH SYMPTOMS')
   end
 
   def columns
@@ -208,8 +214,8 @@ class MaternalHealthSymptomsCSV < EncounterCSV
     'BABY\'S GROWTH', 'MILESTONES', 'PREVENTION'
   ]
 
-  def include_if?(record)
-    record.encounter_types.include?('MATERNAL HEALTH SYMPTOMS')
+  def has_encounter
+    @record.encounter_types.include?('MATERNAL HEALTH SYMPTOMS')
   end
 
   def columns
@@ -219,8 +225,8 @@ end
 
 
 class TipsAndRemindersCSV < EncounterCSV
-  def include_if?(record)
-    record.encounter_types.include?('TIPS AND REMINDERS')
+  def has_encounter
+    @record.encounter_types.include?('TIPS AND REMINDERS')
   end
 
   def columns
@@ -233,9 +239,9 @@ end
 
 
 class OtherCallsCSV < FormattedCSV
-  def include_if?(record)
+  def has_encounter
     # completed calls with a non-normal call type
-    record.call_start && record.call_end && record.call_type != 0
+    @record.call_start && @record.call_end && @record.call_type != 0
   end
 
   def columns

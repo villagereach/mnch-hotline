@@ -118,10 +118,12 @@ class FlattenedCall
 
   def patient
     @patient ||= encounters.any? ? encounters.first.patient : Patient.new
+    @patient.person ||= Person.new  #handle personless patient records.   (? not supposed to happen ?  but found 5 of 6k production entries, 2012-10-05)
+    @patient
   end
 
   def person
-    @person ||= patient.person || Person.new
+    @person ||= patient.person 
   end
 
   def person_attrs
