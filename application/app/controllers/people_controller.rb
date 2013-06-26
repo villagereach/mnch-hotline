@@ -41,13 +41,24 @@ class PeopleController < ApplicationController
  
   # This method is just to allow the select box to submit, we could probably do this better
   def select
-    redirect_to search_complete_url(params[:person], params[:relation]) and return unless params[:person].blank? || params[:person] == '0'
-    redirect_to :action => :new, :gender => params[:gender], :given_name => params[:given_name], :family_name => params[:family_name],
-    :family_name2 => params[:family_name2], :address2 => params[:address2], :identifier => params[:identifier], :relation => params[:relation]
+    if params[:person].blank? || params[:person] == '0'
+      redirect_to :action => :new, :gender => params[:gender], :given_name => params[:given_name], :family_name => params[:family_name],
+    :family_name2 => params[:family_name2], :address2 => params[:address2], :identifier => params[:identifier], :relation => params[:relation],
+    :update_information => 'false'
+    else
+      if ! Person.find(params[:person]).birthdate.nil?
+        redirect_to search_complete_url(params[:person], params[:relation]) and return unless params[:person].blank? || params[:person] == '0'
+      else
+        redirect_to :action => :new, :gender => params[:gender], :given_name => params[:given_name], :family_name => params[:family_name],
+        :family_name2 => params[:family_name2], :address2 => params[:address2], :identifier => params[:identifier], :relation => params[:relation],
+        :update_information => 'true',:update_id => params[:person]
+      end
+    end    
   end
  
-  def create
+  def create 
     Person.session_datetime = session[:datetime].to_date rescue Date.today
+    params[:person][:relation] = params[:relation]
     person = Person.create_from_form(params[:person])
     
     redirect_to search_complete_url(person.id, params[:relation]) and return
@@ -83,6 +94,39 @@ class PeopleController < ApplicationController
     if request.post?
       redirect_to :action => 'search', :identifier => "#{params[:national_id]}" and return
     end
+  end
+  
+  def traditional_authority
+    district_id = District.find_by_name("#{session[:district]}").id
+    traditional_authority_conditions = ["name LIKE (?) AND district_id = ?", "%#{params[:search_string]}%", district_id]
+
+    traditional_authorities = TraditionalAuthority.find(:all,:conditions => traditional_authority_conditions, :order => 'name')
+    traditional_authorities = traditional_authorities.map do |t_a|
+      "<li value='#{t_a.name}'>#{t_a.name}</li>"
+    end
+    render :text => traditional_authorities.join('') + "<li value='Other'>Other</li>" and return
+  end
+  
+  def village
+    traditional_authority_id = TraditionalAuthority.find_by_name("#{params[:filter_value]}").id
+    village_conditions = ["name LIKE (?) AND traditional_authority_id = ?", "%#{params[:search_string]}%", traditional_authority_id]
+
+    villages = Village.find(:all,:conditions => village_conditions, :order => 'name')
+    villages = villages.map do |v|
+      '<li value=' + v.name + '>' + v.name + '</li>'
+    end
+    render :text => villages.join('') + "<li value='Other'>Other</li>" and return
+  end
+  def healthcenter
+    district_id = District.find_by_name("#{session[:district]}").id
+    hc_conditions = ["name LIKE (?) AND district = ?", "%#{params[:search_string]}%", district_id]
+
+    health_centers = HealthCenter.find(:all,:conditions => hc_conditions, :order => 'name')
+    health_centers = health_centers.map do |h_c|
+      "<li value='#{h_c.name.humanize}'>#{h_c.name.humanize}</li>"
+    end
+ 
+    render :text => health_centers.join('') + "<li value='Other'>Other</li>" and return
   end
 
 private

@@ -1,7 +1,7 @@
 class EncountersController < ApplicationController
 
   def create
-
+  #raise params.to_yaml
     Encounter.find(params[:encounter_id].to_i).void("Editing Tips and Reminders") if(params[:editing] && params[:encounter_id])
     # raise params.to_yaml
     if params['encounter']['encounter_type_name'] == 'ART_INITIAL'
@@ -153,6 +153,8 @@ class EncountersController < ApplicationController
 
     @female_danger_signs = @patient.female_danger_signs(concept_set('danger sign'))
     @female_symptoms = @patient.female_symptoms(concept_set('health symptom'))
+    @current_pregnancy_status = @patient.get_current_pregnancy_status.upcase rescue nil
+    #raise @pregnancy_status.to_yaml
     
     #raise @child_symptoms.to_s
     if (@child_danger_signs == "Yes" || @female_danger_signs == "Yes")
@@ -166,9 +168,12 @@ class EncountersController < ApplicationController
     end
 
     # created a hash of 'upcased' health centers
+=begin 
     @health_facilities = ([""] + ClinicSchedule.health_facilities.map(&:name)).inject([]) do |facility_list, facilities|
       facility_list.push(facilities)
     end
+=end
+    @health_facilities = healthcenter 
     #raise @select_options['danger_signs'].to_yaml
     @tips_and_reminders_enrolled_in = type_of_reminder_enrolled_in(@patient)
 
@@ -327,8 +332,8 @@ class EncountersController < ApplicationController
 
     regimen_types.collect{|regimen_type|
       Concept.find_by_name(regimen_type).concept_members.flatten.collect{|member|
-        next if member.concept.fullname.include?("Triomune Baby") and !options[:patient].child?
-        next if member.concept.fullname.include?("Triomune Junior") and !options[:patient].child?
+        next if member.concept.fullname.include?("Triomune Baby") and !options[:patient].child? rescue nil
+        next if member.concept.fullname.include?("Triomune Junior") and !options[:patient].child? rescue nil
         if options[:use_short_names]
           include_fixed = member.concept.fullname.match("(fixed)")
           answer_array << [member.concept.shortname, member.concept_id] unless include_fixed
@@ -374,7 +379,10 @@ class EncountersController < ApplicationController
         ['Baby\'s growth', 'BABY\'S GROWTH'],
         ['Milestones', 'MILESTONES'],
         ['Prevention', 'PREVENTION'],
-        ['Family planning','Family planning']
+        ['Family planning','FAMILY PLANNING'],
+        ['Birth planning - male','BIRTH PLANNING MALE'],
+        ['Birth planning - female','BIRTH PLANNING FEMALE'],
+        ['Other','OTHER']
       ],
       'maternal_health_symptoms' => [
         ['',''],
@@ -387,8 +395,19 @@ class EncountersController < ApplicationController
         ['Swollen hands or feet','SWOLLEN HANDS OR FEET SYMPTOM'],
         ['Paleness of the skin and tiredness','PALENESS OF THE SKIN AND TIREDNESS SYMPTOM'],
         ['No fetal movements','NO FETAL MOVEMENTS SYMPTOM'],
-        ['Water breaks','WATER BREAKS SYMPTOM']
+        ['Water breaks','WATER BREAKS SYMPTOM'],
+        ['Postnatal discharge - bad smell','POSTNATAL DISCHARGE BAD SMELL'],
+        ['Abdominal pain','ABDOMINAL PAIN'],
+        ['Problems with monthly periods','PROBLEMS WITH MONTHLY PERIODS'],
+        ['Problems with family planning method','PROBLEMS WITH FAMILY PLANNING METHOD'],
+        ['Infertility','INFERTILITY'],
+        ['Frequent miscarriages','FREQUENT MISCARRIAGES'],
+        ['Vaginal bleeding (not during pregnancy)','VAGINAL BLEEDING NOT DURING PREGNANCY'],
+        ['Vaginal itching','VAGINAL ITCHING'],
+        ['Vaginal discharge ','VAGINAL DISCHARGE'],
+        ['Other','OTHER']
       ],
+#TODO - add the new symptoms above, danger signs below on to concept server
       'danger_signs' => [
         ['',''],
         ['Heavy vaginal bleeding during pregnancy','HEAVY VAGINAL BLEEDING DURING PREGNANCY'],
@@ -397,10 +416,11 @@ class EncountersController < ApplicationController
         ['Postanatal fever','POSTNATAL FEVER SIGN'],
         ['Severe headache','SEVERE HEADACHE'],
         ['Fits or convulsions','FITS OR CONVULSIONS SIGN'],
-        ['Swollen hands or feet','SWOLLEN HANDS OR FEET SIGN'],
+        ['Swollen hands, feet, and face','SWOLLEN HANDS OR FEET SIGN'],
         ['Paleness of the skin and tiredness','PALENESS OF THE SKIN AND TIREDNESS SIGN'],
         ['No fetal movements','NO FETAL MOVEMENTS SIGN'],
-        ['Water breaks','WATER BREAKS SIGN']
+        ['Water breaks','WATER BREAKS SIGN'],
+        ['Severe abdominal pain','ACUTE ABDOMINAL PAIN']
       ],
       'child_health_info' => [
         ['',''],
@@ -446,28 +466,35 @@ class EncountersController < ApplicationController
          ['', ''],
          ['Pregnant', 'Pregnant'],
          ['NOT pregnant', 'NOT pregnant'],
-         ['Delivered', 'Delivered']
+         ['Delivered', 'Delivered'],
+         ['Miscarried', 'Miscarried']
       ],
       'child_danger_signs_greater_zero_outcome' => [
          ['Referred to a health centre', 'REFERRED TO A HEALTH CENTRE'],
          ['Hospital', 'HOSPITAL'],
          ['Referred to nearest village clinic', 'REFERRED TO NEAREST VILLAGE CLINIC'],
          ['Given advice', 'GIVEN ADVICE'],
-         ['Nurse consultation', 'NURSE CONSULTATION']
+         ['Nurse consultation', 'NURSE CONSULTATION'],
+         ['Registered for Tips and reminders','REGISTERED FOR TIPS AND REMINDERS' ], #'REGISTERED FOR TIPS AND REMINDERS']
+         ['Other','OTHER' ] #'REGISTERED FOR TIPS AND REMINDERS']
       ],
       'child_symptoms_greater_zero_outcome' => [
          ['Referred to nearest village clinic', 'REFERRED TO NEAREST VILLAGE CLINIC'],
          ['Referred to a health centre', 'REFERRED TO A HEALTH CENTRE'],
          ['Hospital', 'HOSPITAL'],
          ['Given advice', 'GIVEN ADVICE'],
-         ['Nurse consultation', 'NURSE CONSULTATION']
+         ['Nurse consultation', 'NURSE CONSULTATION'],
+         ['Registered for Tips and reminders','REGISTERED FOR TIPS AND REMINDERS' ], #'REGISTERED FOR TIPS AND REMINDERS']
+         ['Other','OTHER' ] #'REGISTERED FOR TIPS AND REMINDERS']
       ],
       'general_outcome' => [
          ['Given advice', 'GIVEN ADVICE'],
          ['Referred to nearest village clinic', 'REFERRED TO NEAREST VILLAGE CLINIC'],
          ['Referred to a health centre', 'REFERRED TO A HEALTH CENTRE'],
          ['Hospital', 'HOSPITAL'],
-         ['Nurse consultation', 'NURSE CONSULTATION']
+         ['Nurse consultation', 'NURSE CONSULTATION'],
+         ['Registered for Tips and reminders','REGISTERED FOR TIPS AND REMINDERS' ], #'REGISTERED FOR TIPS AND REMINDERS']
+         ['Other','OTHER' ]
       ],
       'referral_reasons' => [
          ['',''],
@@ -490,7 +517,7 @@ class EncountersController < ApplicationController
         observation["value_#{value_name}"] unless observation["value_#{value_name}"].blank? rescue nil
       }.compact
       
-      next if values.length == 0
+      next if values.length == 0  
       
       # Create an encounter if the obsevations are not empty
       # This keeps us from saving empty encounters
