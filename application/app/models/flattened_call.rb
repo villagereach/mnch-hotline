@@ -27,7 +27,10 @@ class FlattenedCall
   def_delegator  :call, :call_log_id, :call_id
   def_delegator  :call, :start_time,  :call_start
   def_delegator  :call, :end_time,    :call_end
-
+  def_delegator  :call, :call_mode,   :repeat_caller
+  def_delegator  :call, :district
+  
+  
   def_delegators :patient, :national_id, :gender, :ivr_access_code
   def_delegator  :patient, :date_created, :patient_created
 
@@ -46,7 +49,7 @@ class FlattenedCall
 
   # tips and reminders encounters
   def_delegators :obs_hash, :on_tips_and_reminders_program,
-    :telephone_number, :phone_type, :type_of_message, :language_preference,
+    :telephone_number, :telephone_number_type, :type_of_message, :language_preference,
     :type_of_message_content
 
   # cold symptoms observations
