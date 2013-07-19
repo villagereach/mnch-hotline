@@ -7,14 +7,23 @@ class PatientsController < ApplicationController
     @tips_and_reminders_enrolled_in = type_of_reminder_enrolled_in(@patient)
 
     pregnancy_status = @patient.pregnancy_status rescue []
-    if pregnancy_status.length != 0
+    #raise pregnancy_status.to_yaml
+    if ! pregnancy_status.empty? #pregnancy_status.length != 0
       @status = pregnancy_status[0]
       @date   = pregnancy_status[1]
     else
       @status = ""
       @date   = ""
     end
-
+    
+    # Done this to get the code going. I guess that I have to review this
+    if @status.nil?
+      @status = ""
+      @date   = ""
+    end
+    #raise require_follow_up.map(&:patient_id).to_yaml
+    @patient_needs_follow_up = FollowUp.get_follow_ups(session[:district]).map(&:patient_id).include? @patient.id
+    #raise FollowUp.get_follow_ups.to_yaml
     session[:mnch_protocol_required] = false
    #added this to ensure that we are able to void the encounters
     void_encounter if (params[:void] && params[:void] == 'true')

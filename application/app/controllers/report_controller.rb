@@ -168,7 +168,8 @@ class ReportController < ApplicationController
   end
   
   def select
-
+    @districts = [""] + District.find(:all, :conditions => ['region_id <> 4']).collect{|district| 
+                                        district.name}.join(",").split(",") rescue []
     @report_date_range  = [""]
     @patient_type       = [""]
     @grouping           = [""]
@@ -224,8 +225,14 @@ class ReportController < ApplicationController
 
         end
       when "call_analysis"
-        #case @query
-          #when "call_time_of_day"
+        case @query
+          when "new_vs_repeat_callers"
+            @grouping           += [["By Week", "week"], ["By Month", "month"]]
+            @destination         = [["",""],["To CSV Format", "csv"], ["To Screen", "screen"]]
+          when "follow_up"
+            @grouping           += [["By Week", "week"], ["By Month", "month"]]
+            @destination         = [["",""],["To CSV Format", "csv"], ["To Screen", "screen"]]
+          else
             @patient_type       += ["Women", "Children", "All"]
             @grouping           += [["By Week", "week"], ["By Month", "month"]]
             @staff               = [["",""]] + get_staff_members_list + [["All","All"]]
@@ -237,6 +244,7 @@ class ReportController < ApplicationController
                                     "All"]
             #@call_status         = ["","Yes","No", "All"]
             @destination         = [["",""],["To CSV Format", "csv"], ["To Screen", "screen"]]
+          end
 
       when "tips"
         case @query
@@ -255,6 +263,11 @@ class ReportController < ApplicationController
         @delivery           = [["",""],["SMS","sms"],["Voice","voice"],["All", "all"]]
         @network_prefix     = [["",""],["09","airtel"],["08","tnm"],["Other","other"],["All", "all"]]
         @destination        = [["",""],["To CSV Format", "csv"], ["To Screen", "screen"]]
+        
+      when "family_planning"
+      
+        @grouping            += [["By Week", "week"], ["By Month", "month"]]
+        @destination         = [["",""],["To CSV Format", "csv"], ["To Screen", "screen"]]
 
     end
 
@@ -313,15 +326,24 @@ class ReportController < ApplicationController
 
       when 'call_analysis'
         @reports = ["Call Time of Day", "Call Day Distribution",
-                    "Call Lengths"]
+                    "Call Lengths", "New vs Repeat Callers", "Follow Up"]
 
         @report_label = 'a Call Analysis Report'
         @report_type  = report_type
+        
+      when 'family_planning'
+        @reports = ["Family Planning Satisfaction",
+                    "Info on Family Planning"]
+
+        @report_label = 'a Family Planning Report'
+        @report_type  = report_type
+
     end
     render :template => '/report/type', :layout => 'clinic'
   end
 
   def reports
+    #raise params.to_yaml
     case  params[:query]
       when 'demographics'
         redirect_to :action       => "patient_demographics_report",
@@ -331,7 +353,8 @@ class ReportController < ApplicationController
                   :patient_type => params[:patient_type],
                   :report_type  => params[:report_type],
                   :query        => params[:query],
-                  :destination  => params[:report_destination]
+                  :destination  => params[:report_destination],
+                  :district     => params[:currentdistrict]
 
       when 'health_issues'
         health_task = params[:health_task].downcase.gsub(" ", "_")
@@ -343,7 +366,8 @@ class ReportController < ApplicationController
                   :report_type  => params[:report_type],
                   :health_task  => health_task,
                   :query        => params[:query],
-                  :destination  => params[:report_destination]
+                  :destination  => params[:report_destination],
+                  :district     => params[:currentdistrict]
 
       when 'ages_distribution'
         redirect_to :action       => "patient_age_distribution_report",
@@ -353,7 +377,8 @@ class ReportController < ApplicationController
                   :patient_type => params[:patient_type],
                   :report_type  => params[:report_type],
                   :query        => params[:query],
-                  :destination  => params[:report_destination]
+                  :destination  => params[:report_destination],
+                  :district     => params[:currentdistrict]
 
       when 'patient_activity'
         redirect_to :action       => "patient_activity_report",
@@ -363,7 +388,8 @@ class ReportController < ApplicationController
                   :patient_type => params[:patient_type],
                   :report_type  => params[:report_type],
                   :query        => params[:query],
-                  :destination  => params[:report_destination]
+                  :destination  => params[:report_destination],
+                  :district     => params[:currentdistrict]
 
     when 'referral_followup'
         redirect_to :action       => "patient_referral_report",
@@ -374,6 +400,7 @@ class ReportController < ApplicationController
                   :report_type  => params[:report_type],
                   :query        => params[:query],
                   :destination  => params[:report_destination],
+                  :district     => params[:currentdistrict],
                   :outcome      => params[:outcome]
 
     when 'call_time_of_day'
@@ -385,6 +412,7 @@ class ReportController < ApplicationController
                   :report_type  => params[:report_type],
                   :query        => params[:query],
                   :destination  => params[:report_destination],
+                  :district     => params[:currentdistrict],
                   :call_type    => params[:call_type],
                   :call_status  => params[:call_status],
                   :staff_member => params[:staff_member]
@@ -398,6 +426,7 @@ class ReportController < ApplicationController
                   :report_type  => params[:report_type],
                   :query        => params[:query],
                   :destination  => params[:report_destination],
+                  :district     => params[:currentdistrict],
                   :call_type    => params[:call_type],
                   :call_status  => params[:call_status],
                   :staff_member => params[:staff_member]
@@ -411,6 +440,7 @@ class ReportController < ApplicationController
                   :report_type  => params[:report_type],
                   :query        => params[:query],
                   :destination  => params[:report_destination],
+                  :district     => params[:currentdistrict],
                   :call_type    => params[:call_type],
                   :call_status  => params[:call_status],
                   :staff_member => params[:staff_member]
@@ -424,8 +454,8 @@ class ReportController < ApplicationController
                 :language      => params[:language],
                 :report_type   => params[:report_type],
                 :query        => params[:query],
-                  :destination  => params[:report_destination],
-                :phone_type    => params[:phone_type],
+                :destination  => params[:report_destination],
+                :district     => params[:currentdistrict],
                 :delivery      => params[:delivery],
                 :number_prefix => params[:number_prefix]
 
@@ -439,6 +469,7 @@ class ReportController < ApplicationController
                 :report_type   => params[:report_type],
                 :query        => params[:query],
                 :destination  => params[:report_destination],
+                :district     => params[:currentdistrict],
                 :delivery      => params[:delivery],
                 :number_prefix => params[:number_prefix]
 
@@ -452,9 +483,46 @@ class ReportController < ApplicationController
                 :report_type   => params[:report_type],
                 :query        => params[:query],
                 :destination  => params[:report_destination],
+                :district     => params[:currentdistrict],
                 :phone_type    => params[:phone_type],
                 :delivery      => params[:delivery],
                 :number_prefix => params[:number_prefix]
+     when 'family_planning_satisfaction'
+      redirect_to :action        => "family_planning_satisfaction",
+                :start_date    => params[:start_date],
+                :end_date      => params[:end_date],
+                :grouping      => params[:grouping],
+                :report_type   => params[:report_type],
+                :query        => params[:query],
+                :destination  => params[:report_destination],
+                :district     => params[:currentdistrict]
+     when 'info_on_family_planning'
+      redirect_to :action        => "info_on_family_planning",
+                :start_date    => params[:start_date],
+                :end_date      => params[:end_date],
+                :grouping      => params[:grouping],
+                :report_type   => params[:report_type],
+                :query        => params[:query],
+                :destination  => params[:report_destination],
+                :district     => params[:currentdistrict]
+    when 'new_vs_repeat_callers'
+      redirect_to :action        => "new_vs_repeat_callers",
+                :start_date    => params[:start_date],
+                :end_date      => params[:end_date],
+                :grouping      => params[:grouping],
+                :report_type   => params[:report_type],
+                :query        => params[:query],
+                :destination  => params[:report_destination],
+                :district     => params[:currentdistrict]
+    when 'follow_up'
+      redirect_to :action        => "follow_up",
+                :start_date    => params[:start_date],
+                :end_date      => params[:end_date],
+                :grouping      => params[:grouping],
+                :report_type   => params[:report_type],
+                :query        => params[:query],
+                :destination  => params[:report_destination],
+                :district     => params[:currentdistrict]
     end
 
   end
@@ -467,10 +535,11 @@ class ReportController < ApplicationController
     @query        = params[:query]
     @grouping     = params[:grouping]
     @source       = params[:source] rescue nil
+    district = params[:district]
 
-    @report_name  = "Patient Demographics"
+    @report_name  = "Patient Demographics for #{params[:district]} district"
     @report       = Report.patient_demographics(@patient_type, @grouping,
-                                                @start_date, @end_date)
+                                                @start_date, @end_date, district)
     
     @cumulative_total =  @report.inject(0){|total, item| total = total + item[:new_registrations].to_i}
 
@@ -500,11 +569,12 @@ class ReportController < ApplicationController
     @query        = params[:query]
     @grouping     = params[:grouping]
     @source       = params[:source] rescue nil
+    district     = params[:district]
 
-    @report_name  = "Patient Health Issues"
+    @report_name  = "Patient Health Issues for #{params[:district]} district"
     @report       = Report.patient_health_issues(@patient_type, @grouping, 
                                                   @health_task, @start_date,
-                                                  @end_date)
+                                                  @end_date, district)
     if params[:destination] == 'csv'
       report_header = ["", "#{@health_task.gsub(/_/, " ").capitalize}", "Count", "Percentage"]
       export_to_csv('patient_health_issues_report', report_header , @report,
@@ -528,6 +598,7 @@ class ReportController < ApplicationController
     @query        = params[:query]
     @grouping     = params[:grouping]
     @source       = params[:source] rescue nil
+    district = params[:district]
 
     case @patient_type.downcase
     when 'women'
@@ -541,9 +612,9 @@ class ReportController < ApplicationController
     end
 
 
-    @report_name  = "Patient Age Distribution"
+    @report_name  = "Patient Age Distribution for #{params[:district]} district"
     @report       = Report.patient_age_distribution(@patient_type, @grouping,
-                                                    @start_date, @end_date)
+                                                    @start_date, @end_date, district)
 
     if params[:destination] == 'csv'
       report_header = ["", "Count", "%age", "Min","Max","Avg","S.Dev"]
@@ -568,10 +639,11 @@ class ReportController < ApplicationController
     @grouping     = params[:grouping]
     @special_message = ""
     @source       = params[:source] rescue nil
+    district = params[:district]
 
-    @report_name  = "Patient Activity"
+    @report_name  = "Patient Activity for #{params[:district]} district"
     @report    = Report.patient_activity(@patient_type, @grouping,
-                                         @start_date, @end_date)
+                                         @start_date, @end_date, district)
 
     if params[:destination] == 'csv'
       report_header = ["", "Count","Health Symptoms Count", "Health Symptoms %age",
@@ -600,11 +672,11 @@ class ReportController < ApplicationController
     @outcome      = params[:outcome]
     @special_message = ""
     @source       = params[:source] rescue nil
-
+    district = params[:district]
     #raise params.to_yaml
-    @report_name  = "Referral Followup"
+    @report_name  = "Referral Followup for #{district} district"
     @report    = Report.patient_referral_followup(@patient_type, @grouping, @outcome,
-                                         @start_date, @end_date)
+                                         @start_date, @end_date, district)
 
     if params[:destination] == 'csv'
       report_header = ["Caller Name","Phone Number", "Call Summary" ]
@@ -638,6 +710,7 @@ class ReportController < ApplicationController
     @call_type    = params[:call_type]
     @special_message = ""
     @source       = params[:source] rescue nil
+    district      = params[:district]
 
     if @staff_member == "All"
       @staff = @staff_member
@@ -646,10 +719,10 @@ class ReportController < ApplicationController
     end
 
     #raise params.to_yaml
-    @report_name  = "Call Time Of Day"
+    @report_name  = "Call Time Of Day for #{district} District"
     @report    = Report.call_time_of_day(@patient_type, @grouping, @call_type,
                                          @call_status, @staff_member,
-                                         @start_date, @end_date)
+                                         @start_date, @end_date, district)
 
     if params[:destination] == 'csv'
       report_header = ["","Count", "Morning Count", "Morning %age",
@@ -681,6 +754,7 @@ class ReportController < ApplicationController
     @call_type    = params[:call_type]
     @special_message = ""
     @source       = params[:source] rescue nil
+    district      = params[:district]
 
     if @staff_member == "All"
       @staff = @staff_member
@@ -688,10 +762,10 @@ class ReportController < ApplicationController
       @staff = User.find(@staff_member).username
     end
     
-    @report_name  = "Call Day Distribution"
+    @report_name  = "Call Day Distribution for #{district} District"
     @report    = Report.call_day_distribution(@patient_type, @grouping, @call_type,
                                          @call_status, @staff_member,
-                                         @start_date, @end_date)
+                                         @start_date, @end_date, district)
 
     if params[:destination] == 'csv'
       report_header = ["","Count", "Monday Count", "Monday %age",
@@ -725,6 +799,7 @@ class ReportController < ApplicationController
     @call_status  = params[:call_status]
     @call_type    = params[:call_type]
     @source       = params[:source] rescue  nil
+    district      = params[:district]
 
     @special_message = "<I> -- (Please note that the call lengths " +
                        "are in <B>Seconds</B>)<I>"
@@ -735,10 +810,10 @@ class ReportController < ApplicationController
       @staff = User.find(@staff_member).username
     end
 
-    @report_name  = "Call Length"
+    @report_name  = "Call Lengths Report for #{district} District"
     @report    = Report.call_lengths(@patient_type, @grouping, @call_type,
                                          @call_status, @staff_member,
-                                         @start_date, @end_date)
+                                         @start_date, @end_date, district)
 
     if params[:destination] == 'csv'
       report_header = ["","Count", "Morning Count", "Morning Avg", "Morning Min", "Morning SDev",
@@ -772,13 +847,14 @@ class ReportController < ApplicationController
     @delivery       = params[:delivery]
     @number_prefix  = params[:number_prefix]
     @source         = params[:source] rescue nil
+    district        = params[:district]
 
     @special_message = ""
 
-    @report_name  = "Tips Activity"
+    @report_name  = "Tips Activity for #{district} District"
     @report    = Report.tips_activity(@start_date, @end_date, @grouping,
                                       @content_type, @language, @phone_type,
-                                      @delivery, @number_prefix)
+                                      @delivery, @number_prefix, district)
 
     if params[:destination] == 'csv'
       report_header = ["","Count", "Content Pregnancy Count",
@@ -816,12 +892,13 @@ class ReportController < ApplicationController
     @delivery       = params[:delivery]
     @number_prefix  = params[:number_prefix]
     @source         = params[:source] rescue nil
+    district        = params[:district]
 
     @special_message = ""
 
-    @report_name  = "Current Enrollment Totals"
+    @report_name  = "Current Enrollment Totals for #{district} District"
     @report    = Report.current_enrollment_totals(@start_date, @end_date, @grouping,
-                                      @content_type, @language, @delivery, @number_prefix)
+                                      @content_type, @language, @delivery, @number_prefix, district)
 
     if params[:destination] == 'csv'
       report_header = ["","Count", "Content Pregnancy Count",
@@ -861,13 +938,14 @@ class ReportController < ApplicationController
     @delivery       = "All"
     @number_prefix  = "All"
     @source         = params[:source] rescue nil
+    district        = params[:district]
 
     @special_message = ""
 
-    @report_name  = "Individual Current Enrollments"
+    @report_name  = "Individual Current Enrollments for #{district} District"
     @report    = Report.individual_current_enrollments(@start_date, @end_date, @grouping,
                                       @content_type, @language, @phone_type,
-                                      @delivery, @number_prefix)
+                                      @delivery, @number_prefix, district)
 
     if params[:destination] == 'csv'
       report_header = ["Full Name", "On Tips", "Phone Type", "Phone Number",
@@ -875,6 +953,112 @@ class ReportController < ApplicationController
                        ]
       export_to_csv('individual_current_enrollments', report_header, @report, @patient_type,
                   @grouping)
+      if @source == nil
+        redirect_to "/clinic"
+      else
+        render :text => "Done"
+      end
+    else
+      render :layout => false
+    end
+  end
+  
+  def family_planning_satisfaction
+    @start_date     = params[:start_date]
+    @end_date       = params[:end_date]
+    @grouping       = params[:grouping]
+    @query          = params[:query]
+    @district       = params[:district]
+    @report_type    = params[:report_type]
+    
+    @report_name  = "Family Planning Satisfaction for #{@district}"
+    @report = Report.family_planning_satisfaction(@start_date, @end_date, @grouping, @district)
+    
+    if params[:destination] == 'csv'
+      report_header = ["Period","Total Non Pregnant Callers", 
+                       "Total on Family Planning",
+                       "%age on Family Planning", "Total on Pills",
+                       "Total on Injectables", "Total on Implants",
+                       "Total on Condoms", "Total on Other",
+                       "Total on Family Planning and Satisfied", 
+                       "%age on family planning and satisfied"
+                     ]
+      export_to_csv('family_planning_satisfaction_report', report_header, @report, "",@grouping)
+      if @source == nil
+        redirect_to "/clinic"
+      else
+        render :text => "Done"
+      end
+    else
+      render :layout => false
+    end
+  end
+  def info_on_family_planning
+    @start_date     = params[:start_date]
+    @end_date       = params[:end_date]
+    @grouping       = params[:grouping]
+    @query          = params[:query]
+    @district       = params[:district]
+    @report_type    = params[:report_type]
+    
+    @report_name  = "Info on Family Planning for #{@district}"
+    @report = Report.info_on_family_planning(@start_date, @end_date, @grouping, @district)
+    
+    if params[:destination] == 'csv'
+      report_header = ["Period", "Total Callers", "Total of those wanting more Info", 
+                       "%age of those wanting more Info"
+                       ]
+      export_to_csv('info_on_family_planning_report', report_header, @report, "", @grouping )
+      if @source == nil
+        redirect_to "/clinic"
+      else
+        render :text => "Done"
+      end
+    else
+      render :layout => false
+    end
+  end
+  def new_vs_repeat_callers
+    @start_date     = params[:start_date]
+    @end_date       = params[:end_date]
+    @grouping       = params[:grouping]
+    @query          = params[:query]
+    @district       = params[:district]
+    @report_type    = params[:report_type]
+    
+    @report_name  = "New vs Repeat Callers for #{@district} District"
+    @report = Report.new_vs_repeat_callers_report(@start_date, @end_date, @grouping, @district)
+    #raise @report.to_yaml
+    if params[:destination] == 'csv'
+      report_header = ["Period", "Total calls", 
+                       "New Calls", "%age of New Calls", "Repeat Calls",
+                       "%age of Repeat Calls"
+                       ]
+      export_to_csv('new_vs_repeat_callers_report', report_header, @report,"", @grouping)
+      if @source == nil
+        redirect_to "/clinic"
+      else
+        render :text => "Done"
+      end
+    else
+      render :layout => false
+    end
+  end
+  def follow_up
+    @start_date     = params[:start_date]
+    @end_date       = params[:end_date]
+    @grouping       = params[:grouping]
+    @query          = params[:query]
+    @district       = params[:district]
+    @report_type    = params[:report_type]
+    
+    @report_name  = "Caller Follow Up Report for #{@district} District "
+    @report = Report.follow_up_report(@start_date, @end_date, @grouping, @district)
+
+    if params[:destination] == 'csv'
+      report_header = ["Follow Up Result","Count","Percentage"
+                       ]
+      export_to_csv('caller_follow_up_report', report_header, @report,"", @grouping)
       if @source == nil
         redirect_to "/clinic"
       else

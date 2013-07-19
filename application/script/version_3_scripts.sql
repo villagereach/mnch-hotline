@@ -14,6 +14,7 @@ CREATE PROCEDURE`update_table_columns`()
 			ALTER TABLE `call_log` ADD COLUMN `call_mode` INT(11) NOT NULL DEFAULT 0 ;
 		END IF;
 		
+
 	END$$
 
 DELIMITER ;
@@ -28,9 +29,24 @@ INSERT IGNORE INTO global_property (property, property_value, `description`, uui
 
 INSERT IGNORE INTO global_property (property, property_value, `description`, uuid) VALUES ('call_mode', 'New,Repeat', 'Call Type whether New or Repeat', (SELECT UUID()));
 
+INSERT IGNORE INTO global_property (property, property_value, `description`, uuid) VALUES ('followup.threshhold', 1, 'The number of weeks to base the follow up calls', (SELECT UUID()));
+
 -- DROP update_table_columns PROCEDURE
 
 DROP PROCEDURE IF EXISTS `update_table_columns`;
+
+		
+CREATE TABLE IF NOT EXISTS `follow_up` (
+  `follow_up_id` int(11) NOT NULL AUTO_INCREMENT,
+  `patient_id` int(11) NOT NULL DEFAULT '0',
+  `result` varchar(255) DEFAULT NULL,
+  `creator` int(11) NOT NULL DEFAULT '0',
+  `date_created` datetime NOT NULL DEFAULT '0000-00-00 00:00:00',
+  `district` INT(11) NOT NULL  DEFAULT 0, 
+  PRIMARY KEY (`follow_up_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+
 
 /*
 -- Create a Village Headman table
@@ -68,3 +84,9 @@ TODO
 - write a script to add all the village headmen
 - create interface for entering health centers in the administration mode
 */
+
+-- Update concept table. un retire the concept below (guardian present) as this was causing the system to crash
+
+update concept set retired = 0 where concept_id = 6794;
+
+

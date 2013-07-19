@@ -25,10 +25,10 @@
   <div id="patient_card">
     <div id="ivr_access_code" value="<%= @patient.ivr_access_code rescue '' %>">IVR Access Code</div>
     
-    <% if @status == 'DELIVERED' %>
+    <% if @status.upcase == 'DELIVERED' %>
         <div id="date_delivered" value="<%=@date%>">Date Delivered</div>
     <% end %>
-    <% if @status == 'PREGNANT'%>
+    <% if @status.upcase == 'PREGNANT'%>
         <div id="expected_delivery_date" value="<%=@date%>">Expected Delivery Date</div>
     <% end %>
   </div>
@@ -71,6 +71,9 @@
       <option value='/encounters/recent_tip_and_reminder_program?patient_id=<%=@patient.id%>'>Edit Reminders</option>
       <option value='/patients/demographics?patient_id=<%=@patient.id%>'>Edit Demograghics</option>
     <%  end %>
+    <% if @patient_needs_follow_up == true %>
+        <option value='/clinic/followup?person=<%=@patient.id%>&source=PD'>Follow up</option>
+    <% end %>
   </select>
 </div>
 

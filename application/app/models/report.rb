@@ -64,7 +64,10 @@ module Report
     return grouping_date_ranges
   end
 
-  def self.patient_demographics_query_builder(patient_type, date_range)
+  def self.patient_demographics_query_builder(patient_type, date_range, district_id)
+    # Get a list of health centers for the particular district
+    health_centers = "'" + get_nearest_health_centers(district_id).map(&:name).join("','") + "'"
+
     child_maximum_age     = 9 # see definition of a female adult above
     nearest_health_center = PersonAttributeType.find_by_name("NEAREST HEALTH FACILITY").id
 
@@ -73,6 +76,7 @@ module Report
         pregnancy_status_concept_id         = Concept.find_by_name("PREGNANCY STATUS").concept_id
         pregnancy_status_encounter_type_id  = EncounterType.find_by_name("PREGNANCY STATUS").encounter_type_id
         delivered_status_concept = Concept.find_by_name("Delivered").concept_id
+        call_id = Concept.find_by_name("CALL ID").concept_id
         
         extra_parameters = ", CASE pregnancy_status_table.value_coded " +
                            " WHEN #{delivered_status_concept} THEN 'Delivered' " +
@@ -82,20 +86,25 @@ module Report
         extra_conditions = " AND pregnancy_status_table.person_id = p.patient_id " +
                            "AND (YEAR(p.date_created) - YEAR(ps.birthdate)) > #{child_maximum_age} "
 
-        sub_query       = ", (SELECT  obs.person_id AS person_id, obs.value_coded AS value_coded, " +
-                              "concept.concept_id, concept_name.name AS name, obs.value_text AS pregnancy_status " +
-                              "FROM encounter, obs, concept, concept_name " +
-                            "WHERE encounter.encounter_type = #{pregnancy_status_encounter_type_id} " +
-                              "AND obs.encounter_id = encounter.encounter_id " +
-                              "AND concept.concept_id = #{pregnancy_status_concept_id} " +
-                              "AND obs.concept_id = concept.concept_id " +
-                              "AND concept_name.concept_id = concept.concept_id " +
-                              "AND concept.retired = 0 AND concept_name.voided = 0 " +
-                              "AND DATE(obs.obs_datetime) >= '#{date_range.first}' " +
-                              "AND DATE(obs.obs_datetime) <= '#{date_range.last}' " +
-                              "AND obs.voided = 0 " +
+        sub_query       = ", (SELECT  o.person_id AS person_id, o.value_coded AS value_coded, " +
+                              "c.concept_id, cn.name AS name, o.value_text AS pregnancy_status " +
+                              "FROM encounter e " + 
+                                "INNER JOIN obs o " + 
+                                  "ON e.encounter_id = o.encounter_id AND o.concept_id = #{pregnancy_status_concept_id} " + 
+                                "INNER JOIN concept c " + 
+                                  "ON c.concept_id = o.concept_id AND c.retired = 0 " + 
+                                "INNER JOIN concept_name cn " + 
+                                  "ON cn.concept_id = c.concept_id " +
+                                "INNER JOIN obs obs_call ON e.encounter_id = obs_call.encounter_id " +
+                                  "AND obs_call.concept_id = #{call_id} " +
+                                "INNER JOIN call_log cl ON obs_call.value_text = cl.call_log_id " +
+                                  "AND cl.district = #{district_id} " +
+                            "WHERE e.encounter_type = #{pregnancy_status_encounter_type_id} " +
+                              "AND DATE(o.obs_datetime) >= '#{date_range.first}' " +
+                              "AND DATE(o.obs_datetime) <= '#{date_range.last}' " +
+                              "AND e.voided = 0 " +
                             "GROUP BY person_id " +
-                            "ORDER BY obs.person_id, obs.date_created DESC) pregnancy_status_table "
+                            "ORDER BY o.person_id, o.date_created DESC) pregnancy_status_table "
 
       extra_group_by = ", pregnancy_status_table.pregnancy_status "
 
@@ -123,30 +132,32 @@ module Report
                 "LEFT JOIN person ps ON pa.person_id = ps.person_id " +  
                 "INNER JOIN #{patients_with_encounter} ON pa.person_id = patients.patient_id " + sub_query +
             "WHERE pa.person_attribute_type_id = #{nearest_health_center} " + extra_conditions + 
-            "GROUP BY pa.value " + extra_group_by +
+              "AND pa.value IN (#{health_centers}) " +
+            "GROUP BY pa.value " + extra_group_by + 
             " ORDER BY p.date_created"
 
-    #raise query.to_s
     return query
   end
 
-  def self.patient_demographics(patient_type, grouping, start_date, end_date)
-
+  def self.patient_demographics(patient_type, grouping, start_date, end_date, district)
+    
+    district_id = District.find_by_name(district).id
     date_ranges   = Report.generate_grouping_date_ranges(grouping, start_date, end_date)[:date_ranges]
 
     patients_data = []
 
     date_ranges.map do |date_range|
-      query   = self.patient_demographics_query_builder(patient_type, date_range)
+      query   = self.patient_demographics_query_builder(patient_type, date_range, district_id)
+      
       results = Patient.find_by_sql(query)
 
       case patient_type.downcase
         when "women"
-          new_patients_data = self.women_demographics(results, date_range)
+          new_patients_data = self.women_demographics(results, date_range, district_id)
         when "children"
-          new_patients_data = self.children_demographics(results, date_range)
+          new_patients_data = self.children_demographics(results, date_range, district_id)
         else
-          new_patients_data = self.all_patients_demographics(results, date_range)
+          new_patients_data = self.all_patients_demographics(results, date_range, district_id)
       end # end case
       patients_data.push(new_patients_data)
     end
@@ -154,10 +165,10 @@ module Report
     patients_data
   end
 
-  def self.all_patients_demographics(patients_data, date_range)
+  def self.all_patients_demographics(patients_data, date_range, district)
     nearest_health_centers  = []
     
-    mnch_health_facilities_list = Location.find_by_tag("mnch_health_facilities")
+    mnch_health_facilities_list = get_nearest_health_centers(district)
     mnch_health_facilities_list.map do |facility|
       nearest_health_centers.push([facility["name"].humanize, 0])
     end
@@ -191,10 +202,10 @@ module Report
     new_patients_data
   end
 
-  def self.children_demographics(patients_data, date_range)
+  def self.children_demographics(patients_data, date_range, district)
     nearest_health_centers  = []
 
-    mnch_health_facilities_list = Location.find_by_tag("mnch_health_facilities")
+    mnch_health_facilities_list = get_nearest_health_centers(district)
     mnch_health_facilities_list.map do |facility|
       nearest_health_centers.push([facility["name"].humanize, 0])
     end
@@ -229,10 +240,10 @@ module Report
     new_patients_data
   end
 
-  def self.women_demographics(patients_data, date_range)
+  def self.women_demographics(patients_data, date_range, district)
     nearest_health_centers  = []
 
-    mnch_health_facilities_list = Location.find_by_tag("mnch_health_facilities")
+    mnch_health_facilities_list = get_nearest_health_centers(district)
     mnch_health_facilities_list.map do |facility|
       nearest_health_centers.push([facility["name"].humanize, 0])
     end
@@ -244,7 +255,8 @@ module Report
     pregnant      = 0
     non_pregnant  = 1
     delivered     = 2
-    new_patients_data[:pregnancy_status] = [["pregnant", 0], ["non_pregnant", 0], ["delivered", 0]]
+    miscarried    = 3
+    new_patients_data[:pregnancy_status] = [["pregnant", 0], ["non_pregnant", 0], ["delivered", 0], ["miscarried", 0]]
 
     unless patients_data.blank?
       patients_data.map do|data|
@@ -261,6 +273,7 @@ module Report
             new_patients_data[:pregnancy_status][pregnant][1]     += number_of_patients if(pregnancy_status.to_s.upcase  == "PREGNANT")
             new_patients_data[:pregnancy_status][non_pregnant][1] += number_of_patients if(pregnancy_status.to_s.upcase == "NOT PREGNANT")
             new_patients_data[:pregnancy_status][delivered][1]    += number_of_patients if(pregnancy_status.to_s.upcase == "DELIVERED")
+            new_patients_data[:pregnancy_status][miscarried][1]    += number_of_patients if(pregnancy_status.to_s.upcase == "MISCARRIED")
           end
           i += 1
         end
@@ -269,14 +282,16 @@ module Report
     new_patients_data
   end
 
-  def self.patient_health_issues_query_builder(patient_type, health_task, date_range, essential_params)
+  def self.patient_health_issues_query_builder(patient_type, health_task, date_range, essential_params, district_id)
     concept_ids         = essential_params[:concept_ids]
     encounter_type_ids  = essential_params[:encounter_type_ids]
     extra_conditions    = essential_params[:extra_conditions]
     extra_parameters    = essential_params[:extra_parameters]
     #TODO find a better way of getting concpet_names that are not tagged concept_name_tag_map as danger, health_symptom or health info
     concept_names =  '"' + essential_params[:concept_map].inject([]) {|result, concept| result << concept[:concept_name].to_s}.uniq.join('","') + '"'
+
     value_coded_indicator = Concept.find_by_name("YES").id
+    call_id = Concept.find_by_name("CALL ID").id
     
     child_maximum_age = 9
     
@@ -293,6 +308,10 @@ module Report
               "LEFT JOIN patient ON encounter.patient_id = patient.patient_id " +
               "LEFT JOIN person ON patient.patient_id = person.person_id " +
               "LEFT JOIN concept_name on obs.concept_id = concept_name.concept_id " + 
+              "INNER JOIN obs obs_call ON encounter.encounter_id = obs_call.encounter_id " +
+                "AND obs_call.concept_id = #{call_id} " +
+              "INNER JOIN call_log cl ON obs_call.value_text = cl.call_log_id " +
+                "AND cl.district = #{district_id} " +
             "WHERE encounter_type.encounter_type_id IN (#{encounter_type_ids}) " +
               "AND obs.concept_id IN (#{concept_ids}) " +
               "AND encounter.voided = 0 AND obs.voided = 0 AND concept_name.voided = 0 " +
@@ -323,13 +342,14 @@ module Report
 
   def self.prepopulate_concept_ids_and_extra_parameters(patient_type, health_task)
     if health_task.humanize.downcase == "outcomes"
-      concepts_list       = ["OUTCOME"]
+      concepts_list       = ["OUTCOME","SECONDARY OUTCOME"]
       encounter_type_list = ["UPDATE OUTCOME"]
       outcomes            = ["REFERRED TO A HEALTH CENTRE",
                               "REFERRED TO NEAREST VILLAGE CLINIC",
                               "PATIENT TRIAGED TO NURSE SUPERVISOR",
                               "GIVEN ADVICE NO REFERRAL NEEDED",
-                              "HOSPITAL"]
+                              "HOSPITAL",
+                              "REGISTERED FOR TIPS AND REMINDERS"]
 
       extra_parameters    = " obs.value_text AS concept_name, "
       extra_conditions    = " obs.value_text, DATE(obs.date_created), "
@@ -374,9 +394,16 @@ module Report
                               "FITS OR CONVULSIONS SYMPTOM",
                               "SWOLLEN HANDS OR FEET SYMPTOM",
                               "PALENESS OF THE SKIN AND TIREDNESS SYMPTOM",
-                              "NO FETAL MOVEMENTS SYMPTOM", "WATER BREAKS SYMPTOM"
+                              "NO FETAL MOVEMENTS SYMPTOM", "WATER BREAKS SYMPTOM",
+                              "POSTNATAL DISCHARGE BAD SMELL", "ABDOMINAL PAIN",
+                              "PROBLEMS WITH MONTHLY PERIODS",
+                              "PROBLEMS WITH FAMILY PLANNING METHO", "INFERTILITY",
+                              "FREQUENT MISCARRIAGES",
+                              "VAGINAL BLEEDING NOT DURING PREGNANCY",
+                              "VAGINAL ITCHING","VAGINAL DISCHARGE",
+                              "OTHER"
                               ]
-
+                              
           when "danger warning signs"
             concepts_list = ["HEAVY VAGINAL BLEEDING DURING PREGNANCY",
                               "EXCESSIVE POSTNATAL BLEEDING",
@@ -385,14 +412,18 @@ module Report
                               "FITS OR CONVULSIONS SIGN",
                               "SWOLLEN HANDS OR FEET SIGN",
                               "PALENESS OF THE SKIN AND TIREDNESS SIGN",
-                              "NO FETAL MOVEMENTS SIGN", "WATER BREAKS SIGN"]
+                              "NO FETAL MOVEMENTS SIGN", "WATER BREAKS SIGN",
+                              "ACUTE ABDOMINAL PAIN"
+                              ]
 
           when "health information requested"
             concepts_list = ["HEALTHCARE VISITS", "NUTRITION", "BODY CHANGES",
                               "DISCOMFORT", "CONCERNS", "EMOTIONS",
                               "WARNING SIGNS", "ROUTINES", "BELIEFS",
                               "BABY'S GROWTH", "MILESTONES", "PREVENTION",
-                              "FAMILY PLANNING"]
+                              "FAMILY PLANNING", "BIRTH PLANNING MALE",
+                              "BIRTH PLANNING FEMALE","OTHER"]
+
         end
       else #all
         encounter_type_list = ["MATERNAL HEALTH SYMPTOMS", "CHILD HEALTH SYMPTOMS"]
@@ -408,7 +439,14 @@ module Report
                               "NO FETAL MOVEMENTS SYMPTOM", "WATER BREAKS SYMPTOM",
                               "FEVER", "DIARRHEA", "COUGH", "CONVULSIONS SYMPTOM",
                               "NOT EATING", "VOMITING", "RED EYE",
-                              "FAST BREATHING", "VERY SLEEPY", "UNCONSCIOUS"
+                              "FAST BREATHING", "VERY SLEEPY", "UNCONSCIOUS",
+                              "POSTNATAL DISCHARGE BAD SMELL", "ABDOMINAL PAIN",
+                              "PROBLEMS WITH MONTHLY PERIODS",
+                              "PROBLEMS WITH FAMILY PLANNING METHO", "INFERTILITY",
+                              "FREQUENT MISCARRIAGES",
+                              "VAGINAL BLEEDING NOT DURING PREGNANCY",
+                              "VAGINAL ITCHING","VAGINAL DISCHARGE",
+                              "OTHER"
                               ]
             
           when "danger warning signs"
@@ -426,7 +464,9 @@ module Report
                               "CONVULSIONS SIGN", "NOT EATING OR DRINKING ANYTHING",
                               "VOMITING EVERYTHING",
                               "RED EYE FOR 4 DAYS OR MORE WITH VISUAL PROBLEMS",
-                              "VERY SLEEPY OR UNCONSCIOUS", "POTENTIAL CHEST INDRAWING"
+                              "VERY SLEEPY OR UNCONSCIOUS", "POTENTIAL CHEST INDRAWING",
+                               "BIRTH PLANNING MALE",
+                              "BIRTH PLANNING FEMALE","OTHER"
                               ]
 
           when "health information requested"
@@ -437,7 +477,9 @@ module Report
                               "SLEEPING", "FEEDING PROBLEMS", "CRYING",
                               "BOWEL MOVEMENTS", "SKIN RASHES", "SKIN INFECTIONS",
                               "UMBILICUS INFECTION", "GROWTH MILESTONES",
-                              "ACCESSING HEALTHCARE SERVICES", "FAMILY PLANNING"
+                              "ACCESSING HEALTHCARE SERVICES", "FAMILY PLANNING",
+                              "BIRTH PLANNING MALE",
+                              "BIRTH PLANNING FEMALE","OTHER"
                               ]
         end
 
@@ -485,27 +527,45 @@ module Report
               :extra_conditions   => extra_conditions,
               :extra_parameters   => extra_parameters}
 
-    params
+    return params
   end
 
-  def self.call_count(date_range, patient_type,count_type = nil)
+  def self.call_count(date_range, patient_type, district_id, count_type = nil)
     call_id = Concept.find_by_name("CALL ID").id
     child_maximum_age = 9
     
     if patient_type.humanize.downcase == "children"
-      extra_parameters = "AND (YEAR(obs.date_created) - YEAR(person.birthdate)) <= #{child_maximum_age} "
+      extra_parameters = "AND (YEAR(o.date_created) - YEAR(p.birthdate)) <= #{child_maximum_age} "
     elsif patient_type.humanize.downcase == "women"
-      extra_parameters = "AND (YEAR(obs.date_created) - YEAR(person.birthdate)) > #{child_maximum_age} "
+      extra_parameters = "AND (YEAR(o.date_created) - YEAR(p.birthdate)) > #{child_maximum_age} "
     else
       extra_parameters = ""
     end
     
     if count_type.to_s.downcase == 'all'
-      select_part = "SELECT obs.person_id AS call_count, "
+      select_part = "SELECT o.person_id AS call_count, "
     else
-      select_part = "SELECT COUNT( DISTINCT obs.person_id) AS call_count, "
+      select_part = "SELECT COUNT(DISTINCT o.person_id) AS call_count, "
     end
     
+    query   =  "#{select_part}" +
+                  "cn.name AS concept_name, " +
+                  "DATE(e.date_created) AS start_date " +
+                "FROM encounter e " + 
+                  "INNER JOIN obs o ON o.encounter_id = e.encounter_id " + 
+                    "AND o.concept_id = #{call_id} " + 
+                  "INNER JOIN call_log cl ON cl.call_log_id = o.value_text " + 
+                    "AND cl.district = #{district_id} " +  
+                  "INNER JOIN person p ON o.person_id = p.person_id " + 
+                  "INNER JOIN concept_name cn ON o.concept_id = cn.concept_id " + 
+                "WHERE DATE(o.date_created) >= '#{date_range.first}' " +
+                  "AND DATE(o.date_created) <= '#{date_range.last}' " + 
+                  "AND e.voided = 0 AND o.voided = 0 AND cn.voided = 0 " + 
+                  " #{extra_parameters} " +
+                "GROUP BY o.concept_id " +
+                "ORDER BY DATE(o.date_created), o.concept_id"
+ 
+=begin
     query   =  "#{select_part}" +
                   "concept_name.name AS concept_name, " +
                   "DATE(encounter.date_created) AS start_date " +
@@ -522,24 +582,37 @@ module Report
                   " #{extra_parameters}" +
                 "GROUP BY obs.concept_id " +
                 "ORDER BY encounter_type.name, DATE(obs.date_created), obs.concept_id"
-
+=end
 
     #raise query.to_s
     Patient.find_by_sql(query)
   end
   
-  def self.call_count_for_period(date_range, patient_type)
+  def self.call_count_for_period(date_range, patient_type, district_id)
     call_id = Concept.find_by_name("CALL ID").id
     child_maximum_age = 9
     
     if patient_type.humanize.downcase == "children"
-      extra_parameters = " AND (YEAR(obs.date_created) - YEAR(person.birthdate)) <= #{child_maximum_age} "
+      extra_parameters = " AND (YEAR(o.date_created) - YEAR(p.birthdate)) <= #{child_maximum_age} "
     elsif patient_type.humanize.downcase == "women"
-      extra_parameters = " AND (YEAR(obs.date_created) - YEAR(person.birthdate)) > #{child_maximum_age} "
+      extra_parameters = " AND (YEAR(o.date_created) - YEAR(p.birthdate)) > #{child_maximum_age} "
     else
       extra_parameters = ""
     end
     
+    query   =  "SELECT distinct o.value_text " +
+               "FROM obs o " +
+                  "LEFT JOIN person p ON o.person_id = p.person_id " +
+                  "INNER JOIN call_log cl ON o.value_text = cl.call_log_id " + 
+                    "AND cl.district = #{district_id} " +
+               "WHERE o.concept_id = #{call_id} " +
+                  "AND DATE(o.date_created) >= '#{date_range.first}' " +
+                  "AND DATE(o.date_created) <= '#{date_range.last}' " +
+                  "AND o.voided = 0 " + extra_parameters +
+               "ORDER BY o.value_text"
+
+#raise query.to_s
+=begin    
     query   =  "SELECT distinct obs.value_text " +
                "FROM obs LEFT JOIN person ON obs.person_id = person.person_id " +
                "WHERE obs.concept_id = #{call_id} " +
@@ -547,54 +620,64 @@ module Report
                   "AND DATE(obs.date_created) <= '#{date_range.last}' " +
                   "AND obs.voided = 0 " + extra_parameters +
                "ORDER BY obs.value_text"
-               
+=end         
     Observation.find_by_sql(query)
     #Patient.find_by_sql(query)
   end
   
-  def self.get_callers(date_range, essential_params, patient_type, task = nil)
+  def self.get_callers(date_range, essential_params, patient_type, district_id, task = nil)
     child_maximum_age     = 9 # see definition of a female adult above
     concept_ids = essential_params[:concept_map].inject([]) {|result, concept| result << concept[:concept_id]}.uniq.join(',')
     value_coded_indicator = Concept.find_by_name("YES").id
 
+    call_id = Concept.find_by_name("CALL ID").id
+
     if patient_type.humanize.downcase == "children"
-      extra_parameters = "AND (YEAR(obs.date_created) - YEAR(person.birthdate)) <= #{child_maximum_age} "
+      extra_parameters = "AND (YEAR(o.date_created) - YEAR(p.birthdate)) <= #{child_maximum_age} "
     elsif patient_type.humanize.downcase == "women"
-      extra_parameters = "AND (YEAR(obs.date_created) - YEAR(person.birthdate)) > #{child_maximum_age} "
+      extra_parameters = "AND (YEAR(o.date_created) - YEAR(p.birthdate)) > #{child_maximum_age} "
     else
       extra_parameters = ""
     end
     
-    query = "SELECT DISTINCT obs.person_id " +
-            "FROM obs " +
-            "INNER JOIN person " +
-            "ON person.person_id = obs.person_id " +
-            "WHERE obs.concept_id IN (#{concept_ids}) " + extra_parameters +
-            "AND DATE(obs.date_created) >= '#{date_range.first}' " +
-            "AND DATE(obs.date_created) <= '#{date_range.last}' " +
-            " AND obs.voided = 0" 
+    query = "SELECT DISTINCT o.person_id " +
+            "FROM obs o " +
+              "INNER JOIN person p " +
+                "ON p.person_id = o.person_id " + 
+              "INNER JOIN obs obs_call " +
+                "ON o.encounter_id = obs_call.encounter_id " +
+                "AND obs_call.concept_id = #{call_id} " +
+              "INNER JOIN call_log cl " +
+                "ON obs_call.value_text = cl.call_log_id " +
+                "AND cl.district = #{district_id} " +
+            "WHERE o.concept_id IN (#{concept_ids}) " + extra_parameters +
+              "AND DATE(o.date_created) >= '#{date_range.first}' " +
+              "AND DATE(o.date_created) <= '#{date_range.last}' " +
+              "AND o.voided = 0" 
             
     if task.to_s.upcase != "OUTCOMES"
-      query = query + " AND obs.value_coded = " + value_coded_indicator.to_s
+      query = query + " AND o.value_coded = " + value_coded_indicator.to_s
     end 
-       
+
     Patient.find_by_sql(query)
+    
   end
 
-  def self.patient_health_issues(patient_type, grouping, health_task, start_date, end_date)
+  def self.patient_health_issues(patient_type, grouping, health_task, start_date, end_date, district)
+    district_id = District.find_by_name(district).id
     patients_data = []
     date_ranges   = Report.generate_grouping_date_ranges(grouping, start_date, end_date)[:date_ranges]
 
     essential_params  = self.prepopulate_concept_ids_and_extra_parameters(patient_type, health_task)
 
     date_ranges.map do |date_range|
-      query = self.patient_health_issues_query_builder(patient_type, health_task, date_range, essential_params)
+      query = self.patient_health_issues_query_builder(patient_type, health_task, date_range, essential_params, district_id)
       concept_map           = Marshal.load(Marshal.dump(essential_params[:concept_map]))
       results               = Patient.find_by_sql(query)
-      total_call_count      = self.call_count(date_range, patient_type)
-      total_calls_for_period = self.call_count_for_period(date_range, patient_type)
+      total_call_count      = self.call_count(date_range, patient_type, district_id)
+      total_calls_for_period = self.call_count_for_period(date_range, patient_type, district_id)
       total_number_of_calls = total_call_count.first.attributes["call_count"].to_i rescue 0
-      total_callers_with_symptoms = self.get_callers(date_range, essential_params, patient_type, health_task).count
+      total_callers_with_symptoms = self.get_callers(date_range, essential_params, patient_type, district_id, health_task).count
 
       new_patients_data                 = {}
       new_patients_data[:health_issues] = concept_map
@@ -652,40 +735,39 @@ module Report
     patients_data
   end
 
-  def self.patient_age_distribution(patient_type, grouping, start_date, end_date)
-
+  def self.patient_age_distribution(patient_type, grouping, start_date, end_date, district)
+    district_id = District.find_by_name(district).id
     date_ranges   = Report.generate_grouping_date_ranges(grouping, start_date, end_date)[:date_ranges]
 
     patients_data = []
 
     date_ranges.map do |date_range|
-      query   = self.patient_demographics_query_builder(patient_type, date_range)
+      query   = self.patient_demographics_query_builder(patient_type, date_range, district_id)
       results = Patient.find_by_sql(query)
 
       data_for_patients = {:patient_data => {}, :statistical_data => {}}
       case patient_type.downcase
         when "women"
-          new_patients_data = self.women_demographics(results, date_range)
-          statistical_data = Patient.find_by_sql(self.get_age_statistics(patient_type, date_range))
-
+          new_patients_data = self.women_demographics(results, date_range, district_id)
+          statistical_data = Patient.find_by_sql(self.get_age_statistics(patient_type, date_range, district_id))
           patient_statistics = self.create_patient_statistics(patient_type,
                                 statistical_data) unless statistical_data.empty?
-
+  
           data_for_patients[:patient_data] = new_patients_data
           data_for_patients[:statistical_data] = patient_statistics rescue ''
 
         when "children"
-          new_patients_data = self.children_demographics(results, date_range)
-          statistical_data = Patient.find_by_sql(self.get_age_statistics(patient_type, date_range))
+          new_patients_data = self.children_demographics(results, date_range, district_id)
+          statistical_data = Patient.find_by_sql(self.get_age_statistics(patient_type, date_range, district_id))
           patient_statistics = self.create_patient_statistics(patient_type,
                                 statistical_data) unless statistical_data.empty?
 
           data_for_patients[:patient_data] = new_patients_data
           data_for_patients[:statistical_data] = patient_statistics rescue ''
         else
-          new_patients_data = self.all_patients_demographics(results, date_range)
-          #raise new_patients_data.to_yaml
-          statistical_data = Patient.find_by_sql(self.get_age_statistics(patient_type, date_range))
+          new_patients_data = self.all_patients_demographics(results, date_range, district_id)
+          
+          statistical_data = Patient.find_by_sql(self.get_age_statistics(patient_type, date_range, district_id))
           patient_statistics = self.create_patient_statistics(patient_type,
                                 statistical_data) unless statistical_data.empty?
 
@@ -695,14 +777,15 @@ module Report
       end # end case
       patients_data.push(data_for_patients)
     end
-    
+    #raise patients_data.to_yaml
     patients_data
   end
 
-  def self.get_age_statistics(patient_type, date_range)
+  def self.get_age_statistics(patient_type, date_range, district_id)
 
     child_maximum_age     = 9 # see definition of a female adult above
     nearest_health_center = PersonAttributeType.find_by_name("NEAREST HEALTH FACILITY").id
+    call_id = Concept.find_by_name("CALL ID").concept_id
 
     case patient_type.downcase
       when "women"
@@ -716,24 +799,28 @@ module Report
         extra_conditions = " AND pregnancy_status_table.person_id = p.patient_id " +
                            "AND (YEAR(p.date_created) - YEAR(ps.birthdate)) > #{child_maximum_age} "
 
-        sub_query       = ", (SELECT  obs.person_id AS person_id, " +
-                              "concept.concept_id, concept_name.name AS name, " +  
-                              "CASE obs.value_coded " +
+        sub_query       = ", (SELECT  o.person_id AS person_id, c.concept_id, cn.name AS name, " +
+                              "CASE o.value_coded " +
                               " WHEN #{delivered_status_concept} THEN 'Delivered' " +
-                              " ELSE obs.value_text " +
+                              " ELSE o.value_text " +
                               "END AS pregnancy_status " +
-                              "FROM encounter, obs, concept, concept_name " +
-                            "WHERE encounter.encounter_type = #{pregnancy_status_encounter_type_id} " +
-                              "AND obs.encounter_id = encounter.encounter_id " +
-                              "AND concept.concept_id = #{pregnancy_status_concept_id} " +
-                              "AND obs.concept_id = concept.concept_id " +
-                              "AND concept_name.concept_id = concept.concept_id " +
-                              "AND concept.retired = 0 AND concept_name.voided = 0 " +
-                              "AND obs.voided = 0 " +
-                              "AND DATE(obs.obs_datetime) >= '#{date_range.first}' " + 
-                              "AND DATE(obs.obs_datetime) <= '#{date_range.last}' " + 
+                              "FROM encounter e " + 
+                                "INNER JOIN obs o " + 
+                                  "ON e.encounter_id = o.encounter_id AND o.concept_id = #{pregnancy_status_concept_id} " + 
+                                "INNER JOIN concept c " + 
+                                  "ON c.concept_id = o.concept_id AND c.retired = 0 " + 
+                                "INNER JOIN concept_name cn " + 
+                                  "ON cn.concept_id = c.concept_id " +
+                                "INNER JOIN obs obs_call ON e.encounter_id = obs_call.encounter_id " +
+                                  "AND obs_call.concept_id = #{call_id} " +
+                                "INNER JOIN call_log cl ON obs_call.value_text = cl.call_log_id " +
+                                  "AND cl.district = #{district_id} " +
+                            "WHERE e.encounter_type = #{pregnancy_status_encounter_type_id} " +
+                              "AND DATE(o.obs_datetime) >= '#{date_range.first}' " +
+                              "AND DATE(o.obs_datetime) <= '#{date_range.last}' " +
+                              "AND e.voided = 0 " +
                             "GROUP BY person_id " +
-                            "ORDER BY obs.person_id, obs.date_created DESC) pregnancy_status_table "
+                            "ORDER BY o.person_id) pregnancy_status_table "
 
       extra_group_by = ", pregnancy_status_table.pregnancy_status "
 
@@ -764,6 +851,10 @@ module Report
           patients_with_encounter = " (SELECT DISTINCT e.patient_id " +
                                 "FROM patient p " +
                                 "  INNER JOIN encounter e ON p.patient_id = e.patient_id " +
+                                "  INNER JOIN obs obs_call on e.encounter_id = obs_call.encounter_id " + 
+                                "     AND obs_call.concept_id = #{call_id} " +
+                                "  INNER JOIN call_log cl ON obs_call.value_text = cl.call_log_id " +
+                                  "AND cl.district = #{district_id} " +
                                 "WHERE DATE(e.encounter_datetime) >= '#{date_range.first}' " + 
                                 "AND DATE(e.encounter_datetime) <= '#{date_range.last}') patients "
     
@@ -776,7 +867,6 @@ module Report
                   "GROUP BY pa.value, ps.person_id" + extra_group_by +
                   " ORDER BY p.date_created"
           
-#raise query.to_s
     return query
   end
 
@@ -785,11 +875,12 @@ module Report
     case patient_type.downcase
       when 'women'
         women_grouping = {:pregnant => {}, :nonpregnant => {},
-                          :delivered => {}
+                          :delivered => {}, :miscarried => {}
         }
         pregnant_data = []
         nonpregnant_data = []
         delivered_data = []
+        miscarried_data = []
 
         unless patient_data.empty?
           patient_data.each do |value|
@@ -800,12 +891,14 @@ module Report
               nonpregnant_data << value[:Age].to_i
             when 'delivered'
               delivered_data << value[:Age].to_i
+            when 'miscarried'
+              miscarried_data << value[:Age].to_i
             end
           end
         end
 
       unless pregnant_data.empty?
-          pregnant_statistics = {:total => 0, :percentage => 0,
+          pregnant_statistics = {:total => pregnant_data.count, :percentage => 0,
                          :average => 0, :min => 0, :max => 0, :sdev => 0
                        }
           pregnant_statistics[:min] = pregnant_data.min
@@ -818,7 +911,7 @@ module Report
         end
 
         unless nonpregnant_data.empty?
-          nonpregnant_statistics = {:total => 0, :percentage => 0,
+          nonpregnant_statistics = {:total => nonpregnant_data.count, :percentage => 0,
                         :average => 0, :min => 0, :max => 0, :sdev => 0
                        }
           nonpregnant_statistics[:min] = nonpregnant_data.min
@@ -831,7 +924,7 @@ module Report
 
         end
         unless delivered_data.empty?
-          delivered = {:total => 0, :percentage => 0,
+          delivered = {:total => delivered_data.count, :percentage => 0,
                         :average => 0, :min => 0, :max => 0, :sdev => 0
                        }
           delivered[:min] = delivered_data.min
@@ -841,6 +934,18 @@ module Report
           delivered[:sdev] = self.calculate_sdev(delivered_data)
 
           women_grouping[:delivered][:statistical_info] = delivered
+        end
+        unless miscarried_data.empty?
+          miscarried = {:total => miscarried_data.count, :percentage => 0,
+                        :average => 0, :min => 0, :max => 0, :sdev => 0
+                       }
+          miscarried[:min] = miscarried_data.min
+          miscarried[:max] = miscarried_data.max
+          miscarried[:percentage] = (miscarried_data.count.to_f / patient_data.count.to_f * 100).round(1)
+          miscarried[:average] = self.calculate_average(miscarried_data)
+          miscarried[:sdev] = self.calculate_sdev(miscarried_data)
+
+          women_grouping[:miscarried][:statistical_info] = miscarried
         end
         return_data = women_grouping
 
@@ -858,7 +963,7 @@ module Report
         end
         
         unless female_data.empty?
-          female_statistics = {:total => 0, :percentage => 0,
+          female_statistics = {:total => female_data.count, :percentage => 0,
                         :average => 0, :min => 0, :max => 0, :sdev => 0
                        }
           female_statistics[:min] = female_data.min
@@ -871,7 +976,7 @@ module Report
         end
 
         unless male_data.empty?
-          male_statistics = {:total => 0, :percentage => 0,
+          male_statistics = {:total => male_data.count, :percentage => 0,
                         :average => 0, :min => 0, :max => 0, :sdev => 0
                        }
           male_statistics[:min] = male_data.min
@@ -898,7 +1003,7 @@ module Report
         end
 
         unless child_data.empty?
-          child_statistics = {:total => 0, :percentage => 0,
+          child_statistics = {:total => child_data.count, :percentage => 0,
                         :average => 0, :min => 0, :max => 0, :sdev => 0
                        }
           child_statistics[:min] = child_data.min
@@ -911,7 +1016,7 @@ module Report
         end
 
         unless women_data.empty?
-          women_statistics = {:total => 0, :percentage => 0,
+          women_statistics = {:total => women_data.count, :percentage => 0,
                         :average => 0, :min => 0, :max => 0, :sdev => 0
                        }
           women_statistics[:min] = women_data.min
@@ -949,15 +1054,16 @@ module Report
    return sdev
  end
 
- def self.patient_activity(patient_type, grouping, start_date, end_date)
+ def self.patient_activity(patient_type, grouping, start_date, end_date, district)
+  district_id = District.find_by_name(district).id
   patients_data = []
   date_ranges   = Report.generate_grouping_date_ranges(grouping, start_date, end_date)[:date_ranges]
 
     date_ranges.map do |date_range|
       
-      query   = self.patient_demographics_query_builder(patient_type, date_range)
+      query   = self.patient_demographics_query_builder(patient_type, date_range, district_id)
       results = Patient.find_by_sql(query)
-      total_calls_for_period = self.call_count_for_period(date_range, patient_type)
+      total_calls_for_period = self.call_count_for_period(date_range, patient_type, district_id)
       #data_for_patients = {:patient_data => {}, :statistical_data => {}}
       patient_statistics = {:start_date => date_range.first, 
                             :end_date => date_range.last, :total => 0,
@@ -969,7 +1075,7 @@ module Report
       activity_type = ["symptoms","danger","info"]
       case patient_type.downcase
         when "women"
-          new_patients_data = self.women_demographics(results, date_range)
+          new_patients_data = self.women_demographics(results, date_range, district_id)
           total_patients = 0
           new_patients_data[:pregnancy_status].each do |status|
             total_patients += status.last
@@ -981,7 +1087,7 @@ module Report
           activity = 'danger warning signs' if type == 'danger'
           activity = 'health information requested' if type == 'info'
             essential_params  = self.prepopulate_concept_ids_and_extra_parameters(patient_type, activity)
-            data_query = self.patient_activity_query_builder(patient_type, activity, date_range, essential_params)
+            data_query = self.patient_activity_query_builder(patient_type, activity, date_range, essential_params, district_id)
             activity_data = Patient.find_by_sql(data_query)
             if type == 'symptoms'
               patient_statistics[:symptoms] = activity_data.first.number_of_patients.to_i
@@ -996,7 +1102,7 @@ module Report
          end
 
         when "children"
-          new_patients_data = self.children_demographics(results, date_range)     
+          new_patients_data = self.children_demographics(results, date_range, district_id)     
           total_patients = 0
           new_patients_data[:gender].each do |status|
             total_patients += status.last
@@ -1008,7 +1114,7 @@ module Report
           activity = 'danger warning signs' if type == 'danger'
           activity = 'health information requested' if type == 'info'
             essential_params  = self.prepopulate_concept_ids_and_extra_parameters(patient_type, activity)
-            data_query = self.patient_activity_query_builder(patient_type, activity, date_range, essential_params)
+            data_query = self.patient_activity_query_builder(patient_type, activity, date_range, essential_params, district_id)
             #raise data_query.to_s
             activity_data = Patient.find_by_sql(data_query)
             if type == 'symptoms'
@@ -1023,7 +1129,7 @@ module Report
             end
          end
         else
-          new_patients_data = self.all_patients_demographics(results, date_range)
+          new_patients_data = self.all_patients_demographics(results, date_range, district_id)
           total_patients = 0
           new_patients_data[:patient_type].each do |status|
             total_patients += status.last
@@ -1035,7 +1141,7 @@ module Report
           activity = 'danger warning signs' if type == 'danger'
           activity = 'health information requested' if type == 'info'
             essential_params  = self.prepopulate_concept_ids_and_extra_parameters(patient_type, activity)
-            data_query = self.patient_activity_query_builder(patient_type, activity, date_range, essential_params)
+            data_query = self.patient_activity_query_builder(patient_type, activity, date_range, essential_params, district_id)
             activity_data = Patient.find_by_sql(data_query)
             if type == 'symptoms'
               patient_statistics[:symptoms] = activity_data.first.number_of_patients.to_i
@@ -1055,7 +1161,8 @@ module Report
     patients_data
   end
 
- def self.patient_activity_query_builder(patient_type, health_task, date_range, essential_params)
+ def self.patient_activity_query_builder(patient_type, health_task, date_range, essential_params, district_id)
+    call_id = Concept.find_by_name("CALL ID").id
     concept_ids         = essential_params[:concept_ids]
     encounter_type_ids  = essential_params[:encounter_type_ids]
     #extra_conditions    = essential_params[:extra_conditions]
@@ -1078,7 +1185,11 @@ module Report
 =end
     query = "SELECT COUNT(DISTINCT o.person_id) AS number_of_patients "  +
             "FROM encounter e " +
-            "INNER JOIN obs o ON e.encounter_id = o.encounter_id " +
+              "INNER JOIN obs o ON e.encounter_id = o.encounter_id " + 
+              "INNER JOIN obs obs_call ON o.encounter_id = obs_call.encounter_id " +
+                "AND obs_call.concept_id = #{call_id} " +
+              "INNER JOIN call_log cl ON obs_call.value_text = cl.call_log_id " +
+                "AND cl.district = #{district_id} " +
             "WHERE e.encounter_type IN (#{encounter_type_ids}) " +
               "AND o.concept_id IN (#{concept_ids}) " +
               "AND DATE(o.date_created) >= '#{date_range.first}' " +
@@ -1086,14 +1197,20 @@ module Report
               "AND e.voided = 0 AND o.voided = 0 " +
               "AND o.value_coded = " + value_coded_indicator.to_s 
 
-    #raise query.to_yaml
+    #raise query.to_s
     query
   end
 
- def self.patient_referral_followup(patient_type, grouping, outcome, start_date, end_date)
+ def self.patient_referral_followup(patient_type, grouping, outcome, start_date, end_date, district)
+    district_id = District.find_by_name(district).id
+    call_id = Concept.find_by_name("CALL ID").id
     patient_data = []
     youth_age = 9
-
+    
+    other_outcomes = ["GIVEN ADVICE NO REFERRAL NEEDED","GIVEN ADVICE"]
+   if outcome == "GIVEN ADVICE NO REFERRAL NEEDED"
+     outcome = other_outcomes
+   end
    #raise outcome.to_yaml
     date_ranges   = Report.generate_grouping_date_ranges(grouping, start_date,
                                                         end_date)[:date_ranges]
@@ -1107,7 +1224,7 @@ module Report
                               AND encounter_datetime >= ?
                               AND encounter_datetime <= ?
                               AND obs.concept_id = ?
-                              AND obs.value_text = ?
+                              AND obs.value_text IN (?)
                               AND (YEAR(encounter.encounter_datetime) - YEAR(person.birthdate)) > ?",
                       EncounterType.find_by_name("Update Outcome").id,
                       date_range.first, date_range.last,
@@ -1118,7 +1235,7 @@ module Report
                               AND encounter_datetime >= ?
                               AND encounter_datetime <= ?
                               AND obs.concept_id = ?
-                              AND obs.value_text = ?
+                              AND obs.value_text IN (?)
                               AND (YEAR(encounter.encounter_datetime) - YEAR(person.birthdate)) <= ?",
                       EncounterType.find_by_name("Update Outcome").id,
                       date_range.first, date_range.last,
@@ -1129,7 +1246,7 @@ module Report
                               AND encounter_datetime >= ?
                               AND encounter_datetime <= ?
                               AND obs.concept_id = ?
-                              AND obs.value_text = ?",
+                              AND obs.value_text IN (?)",
                       EncounterType.find_by_name("Update Outcome").id,
                       date_range.first, date_range.last,
                       Concept.find_by_name("Outcome").id,
@@ -1139,7 +1256,11 @@ module Report
       
       o_encounters = Encounter.find(:all,
                    :joins =>"INNER JOIN obs ON encounter.encounter_id = obs.encounter_id
-                             INNER JOIN person ON patient_id = person.person_id",
+                             INNER JOIN person ON patient_id = person.person_id
+                             INNER JOIN obs obs_call ON obs_call.encounter_id = obs.encounter_id
+                              AND obs_call.concept_id = #{call_id}
+                              INNER JOIN call_log cl ON obs_call.value_text = cl.call_log_id 
+                                AND cl.district = #{district_id}" ,
                    :conditions => condition_options
                   )
 
@@ -1188,7 +1309,8 @@ module Report
  end
 
  def self.call_day_distribution(patient_type, grouping, call_type, call_status,
-                                     staff_member, start_date, end_date)
+                                     staff_member, start_date, end_date, district)
+  district_id = District.find_by_name(district).id
   call_data = []
 
   date_ranges   = Report.generate_grouping_date_ranges(grouping, start_date,
@@ -1197,7 +1319,7 @@ module Report
     date_ranges.map do |date_range|
 
       query   = self.call_analysis_query_builder(patient_type,
-                      date_range, staff_member, call_type, call_status)
+                      date_range, staff_member, call_type, call_status, district_id)
 
       results = CallLog.find_by_sql(query)
 
@@ -1225,7 +1347,8 @@ module Report
    return call_data
  end
 
- def self.call_analysis_query_builder(patient_type, date_range, staff_id, call_type, call_status)
+ def self.call_analysis_query_builder(patient_type, date_range, staff_id, call_type, call_status, district_id)
+   
    child_maximum_age     = 9 # see definition of a female adult above
    call_concept_id = Concept.find_by_name('call id').id
    extra_conditions = " "
@@ -1269,18 +1392,19 @@ module Report
 =end
    
    query = "SELECT TIME(call_log.start_time) AS call_start_time, " +
-           "TIME(call_log.end_time) AS call_end_time, " +
-           "users.username, DATE_FORMAT(start_time,'%W') AS day_of_week, " +
-           "TIMESTAMPDIFF(SECOND, call_log.start_time, call_log.end_time) AS call_length_seconds, " +
-           "TIMESTAMPDIFF(MINUTE, call_log.start_time, call_log.end_time) AS call_length_minutes " +
+              "TIME(call_log.end_time) AS call_end_time, " +
+              "users.username, DATE_FORMAT(start_time,'%W') AS day_of_week, " +
+              "TIMESTAMPDIFF(SECOND, call_log.start_time, call_log.end_time) AS call_length_seconds, " +
+              "TIMESTAMPDIFF(MINUTE, call_log.start_time, call_log.end_time) AS call_length_minutes " +
            "FROM call_log " +
-           "LEFT JOIN obs ON obs.value_text = call_log.call_log_id " +
-           "LEFT JOIN person ON person.person_id = obs.person_id " +
-           "LEFT JOIN users ON users.user_id = obs.creator " +
-           "LEFT JOIN patient ON patient.patient_id = person.person_id " +
+              "LEFT JOIN obs ON obs.value_text = call_log.call_log_id " +
+              "LEFT JOIN person ON person.person_id = obs.person_id " +
+              "LEFT JOIN users ON users.user_id = obs.creator " +
+              "LEFT JOIN patient ON patient.patient_id = person.person_id " +
            "WHERE DATE(call_log.start_time) >= '#{date_range.first}' " +
-           "AND DATE(call_log.start_time) <= '#{date_range.last}' " +
-            extra_conditions +
+              "AND DATE(call_log.start_time) <= '#{date_range.last}' " +
+              "AND call_log.district = '#{district_id}' " +
+               extra_conditions +
            " GROUP BY call_log.call_log_id" + extra_grouping
 
    #raise query.to_s
@@ -1288,8 +1412,10 @@ module Report
   end
 
  def self.call_time_of_day(patient_type, grouping, call_type, call_status,
-                                     staff_member, start_date, end_date)
+                                     staff_member, start_date, end_date, district)
+  district_id = District.find_by_name(district).id
   call_data = []
+  norm_date = Date.today
 
   date_ranges   = Report.generate_grouping_date_ranges(grouping, start_date,
                                                       end_date)[:date_ranges]
@@ -1297,7 +1423,7 @@ module Report
     date_ranges.map do |date_range|
 
       query   = self.call_analysis_query_builder(patient_type,
-                      date_range, staff_member, call_type, call_status)
+                      date_range, staff_member, call_type, call_status, district_id)
 
       results = CallLog.find_by_sql(query)
 
@@ -1311,13 +1437,17 @@ module Report
 
      results.each do |call|
 
-       if Time.parse(call.call_start_time) >= Time.parse("07:00:00") && Time.parse(call.call_start_time) <= Time.parse("10:00:00")
+       if Time.parse("#{call.call_start_time}") >= Time.parse("07:00:00") && 
+          Time.parse("#{call.call_start_time}") <= Time.parse("10:00:00")
          call_statistics[:morning] += 1
-       elsif Time.parse(call.call_start_time) > Time.parse("10:00:00") && Time.parse(call.call_start_time) <= Time.parse("13:00:00")
+       elsif Time.parse("#{call.call_start_time}") > Time.parse("10:00:00") && 
+             Time.parse("#{call.call_start_time}") <= Time.parse("13:00:00")
          call_statistics[:midday] += 1
-       elsif Time.parse(call.call_start_time) > Time.parse("13:00:00") && Time.parse(call.call_start_time) <= Time.parse("16:00:00")
+       elsif Time.parse("#{call.call_start_time}") > Time.parse("13:00:00") && 
+             Time.parse("#{call.call_start_time}") <= Time.parse("16:00:00")
          call_statistics[:afternoon] += 1
-       elsif Time.parse(call.call_start_time) > Time.parse("16:00:00") && Time.parse(call.call_start_time) <= Time.parse("19:00:00")
+       elsif Time.parse("#{call.call_start_time}") > Time.parse("16:00:00") && 
+             Time.parse("#{call.call_start_time}") <= Time.parse("19:00:00")
          call_statistics[:evening] += 1
        end
      end #end of results loop
@@ -1336,8 +1466,10 @@ module Report
  end
 
   def self.call_lengths(patient_type, grouping, call_type, call_status,
-                     staff_member, start_date, end_date)
+                     staff_member, start_date, end_date, district)
+  district_id = District.find_by_name(district).id
   call_data = []
+  norm_date = Date.today
 
   date_ranges   = Report.generate_grouping_date_ranges(grouping, start_date,
                                                       end_date)[:date_ranges]
@@ -1345,8 +1477,8 @@ module Report
     date_ranges.map do |date_range|
 
       query   = self.call_analysis_query_builder(patient_type,
-                      date_range, staff_member, call_type, call_status)
-
+                      date_range, staff_member, call_type, call_status, district_id)
+#raise query.to_s 
       results = CallLog.find_by_sql(query)
 
       call_statistics = {
@@ -1357,23 +1489,24 @@ module Report
       :afternoon => 0, :a_len => [], :a_avg => 0, :a_sdev => 0, :a_min => 0,
       :evening => 0, :e_len => [], :e_avg => 0, :e_sdev => 0, :e_min => 0
                          }
-
+                          
      results.each do |call|
+      date_comp = "#{norm_date} #{call.call_start_time}"
 
-       if Time.parse(call.call_start_time) >= Time.parse("07:00:00") &&
-          Time.parse(call.call_start_time) <= Time.parse("10:00:00")
+       if Time.parse("#{call.call_start_time}") >= Time.parse("07:00:00") &&
+          Time.parse("#{call.call_start_time}") <= Time.parse("10:00:00")
          call_statistics[:morning] += 1
          call_statistics[:m_len] << call.call_length_seconds.to_i
-       elsif Time.parse(call.call_start_time) > Time.parse("10:00:00") &&
-             Time.parse(call.call_start_time) <= Time.parse("13:00:00")
+       elsif Time.parse("#{call.call_start_time}") > Time.parse("10:00:00") &&
+             Time.parse("#{call.call_start_time}") <= Time.parse("13:00:00")
          call_statistics[:midday] += 1
          call_statistics[:mid_len] << call.call_length_seconds.to_i
-       elsif Time.parse(call.call_start_time) > Time.parse("13:00:00") &&
-             Time.parse(call.call_start_time) <= Time.parse("16:00:00")
+       elsif Time.parse("#{call.call_start_time}") > Time.parse("13:00:00") &&
+             Time.parse("#{call.call_start_time}") <= Time.parse("16:00:00")
          call_statistics[:afternoon] += 1
          call_statistics[:a_len] << call.call_length_seconds.to_i
-       elsif Time.parse(call.call_start_time) > Time.parse("16:00:00") &&
-             Time.parse(call.call_start_time) <= Time.parse("19:00:00")
+       elsif Time.parse("#{call.call_start_time}") > Time.parse("16:00:00") &&
+             Time.parse("#{call.call_start_time}") <= Time.parse("19:00:00")
          call_statistics[:evening] += 1
          call_statistics[:e_len] << call.call_length_seconds.to_i
        end
@@ -1410,7 +1543,9 @@ module Report
    return call_data
  end
  def self.tips_activity(start_date, end_date, grouping, content_type, language,
-                        phone_type, delivery, number_prefix)
+                        phone_type, delivery, number_prefix, district)
+ 
+ district_id = District.find_by_name(district).id
  call_data = []
  
  # main obs conceps
@@ -1429,8 +1564,8 @@ module Report
  date_ranges   = Report.generate_grouping_date_ranges(grouping, start_date,
                                                       end_date)[:date_ranges]
   date_ranges.map do |date_range|
-   encounters = self.get_tips_data(date_range)
-   total_calls = self.get_total_tips_calls(date_range)
+   encounters = self.get_tips_data(date_range, district_id)
+   total_calls = self.get_total_tips_calls(date_range, district_id)
 
    row_data = {:start_date => date_range.first,:end_date => date_range.last,
               :total => total_calls,
@@ -1465,65 +1600,83 @@ module Report
 
    call_data << row_data
   end
-
+ 
   return call_data
  end
 
- def self.get_tips_data(date_range)
+ def self.get_tips_data(date_range, district_id)
 
+  call_id = Concept.find_by_name("CALL ID").id
   encounter_type_list = ["TIPS AND REMINDERS"]
   encounter_types = self.get_encounter_types(encounter_type_list)
   encounters_list = Encounter.find(:all,
+                                   :joins => "INNER JOIN obs ON encounter.encounter_id = obs.encounter_id
+                                                AND obs.concept_id = #{call_id}
+                                              INNER JOIN call_log ON obs.value_text = call_log.call_log_id
+                                                AND call_log.district = #{district_id}",
                                    :conditions => ["encounter_type IN (?) AND
                                                     encounter_datetime >= ? AND
                                                     encounter_datetime <= ? AND
-                                                    voided = ?",
+                                                    encounter.voided = ?",
                                                    encounter_types,
                                                    date_range.first,
                                                    date_range.last, 0],
                                   :include => 'observations')
 
-   #raise encounters_list.to_yaml
   return encounters_list
 
  end
 
- def self.get_total_tips_calls(date_range)
+ def self.get_total_tips_calls(date_range, district_id)
 
   encounter_type_list = ["TIPS AND REMINDERS"]
   encounter_types = self.get_encounter_types(encounter_type_list)
-  call_id_concept = Concept.find_by_name("CALL ID").id
+  call_id = Concept.find_by_name("CALL ID").id
 
    query = "SELECT COUNT(DISTINCT obs.value_text) AS count " +
             "FROM encounter " +
-            "INNER JOIN obs " +
-            "ON encounter.encounter_id = obs.encounter_id " +
+              "INNER JOIN obs " +
+                "ON encounter.encounter_id = obs.encounter_id " +
+                  "AND obs.concept_id = #{call_id} " + 
+              "INNER JOIN call_log cl " +
+                "ON obs.value_text = cl.call_log_id " + 
+                  "AND cl.district = #{district_id} " + 
             "WHERE encounter.encounter_type IN (#{encounter_types}) " +
-            "AND DATE(encounter.date_created) >= '#{date_range.first}' " +
-            "AND DATE(encounter.date_created) <= '#{date_range.last}' " +
-            "AND obs.concept_id = #{call_id_concept} " +
-            "AND encounter.voided = 0"
+              "AND DATE(encounter.date_created) >= '#{date_range.first}' " +
+              "AND DATE(encounter.date_created) <= '#{date_range.last}' " +
+              "AND encounter.voided = 0"
 
-    Patient.find_by_sql(query).count
+    total_calls = Patient.find_by_sql(query).first.count
+    
+    if total_calls.blank?
+      return 0
+    else
+      return total_calls.to_i 
+    end
  end
 
- def self.get_tips_data_by_catchment_area(date_range)
-
+ def self.get_tips_data_by_catchment_area(date_range, district_id)
+   
+  health_centers = "'" + get_nearest_health_centers(district_id).map(&:name).join("','") + "'"
   nearest_health_center = PersonAttributeType.find_by_name("NEAREST HEALTH FACILITY").id
   encounter_type_list = ["TIPS AND REMINDERS"]
   encounter_types = self.get_encounter_types(encounter_type_list)
+  call_id = Concept.find_by_name("CALL ID").id
 
-   query = "SELECT pa.value AS catchment, o.*
-            FROM obs o
-              INNER JOIN encounter e
-              ON e.encounter_id = o.encounter_id
-              LEFT JOIN person_attribute pa
-              ON e.patient_id = pa.person_id
-            WHERE pa.person_attribute_type_id = #{nearest_health_center} AND
-                  e.encounter_datetime >= '#{date_range.first}' AND
-                  e.encounter_datetime <= '#{date_range.last}' AND
-                  e.encounter_type IN (#{encounter_types}) AND 
-                  e.voided = 0 AND o.voided = 0"
+   query = "SELECT pa.value AS catchment, o.* " +
+           "FROM obs o " +
+              "INNER JOIN encounter e " +
+                "ON e.encounter_id = o.encounter_id AND o.concept_id = #{call_id} " +
+              "INNER JOIN call_log cl " +
+                "ON o.value_text = cl.call_log_id " + 
+                  "AND cl.district = #{district_id} " + 
+              "LEFT JOIN person_attribute pa " +
+                "ON e.patient_id = pa.person_id " +
+            "WHERE pa.person_attribute_type_id = #{nearest_health_center} AND " +
+                  "e.encounter_datetime >= '#{date_range.first}' AND " +
+                  "e.encounter_datetime <= '#{date_range.last}' AND " +
+                  "e.encounter_type IN (#{encounter_types}) AND " + 
+                  "e.voided = 0 AND o.voided = 0 AND pa.value IN (#{health_centers}) " 
 =begin
   encounters_list = Encounter.find(:all,
                                    :joins => "LEFT JOIN person_attribute ON person_attribute.person_id = encounter.patient_id",
@@ -1539,7 +1692,7 @@ module Report
 =end
    
   data_list = Encounter.find_by_sql(query)
-  
+  #raise data_list.to_yaml
   return data_list
  end
 
@@ -1560,7 +1713,8 @@ module Report
 =end
 
  def self.current_enrollment_totals(start_date, end_date, grouping, content_type, language,
-                        delivery, number_prefix)
+                        delivery, number_prefix, district)
+   district_id = District.find_by_name(district).id
    call_data = []
 
    # main obs conceps
@@ -1587,7 +1741,7 @@ module Report
      period_total_callers = 0
      count += 1
      #encounters_count = self.get_total_tips_encounters(date_range)
-     encounters = self.get_tips_data_by_catchment_area(date_range)
+     encounters = self.get_tips_data_by_catchment_area(date_range, district_id)
 
      encounters.group_by(&:catchment).each do |area, data|
      
@@ -1643,10 +1797,11 @@ module Report
  end
 
  def self.individual_current_enrollments(start_date, end_date, grouping, content_type, language,
-                        phone_type, delivery, number_prefix)
+                        phone_type, delivery, number_prefix, district)
+ district_id = District.find_by_name(district).id
  call_data = []
 
-   # main obs conceps
+   # main obs concepts
    content_concept = Concept.find_by_name('TYPE OF MESSAGE CONTENT').id
    language_concept = Concept.find_by_name('LANGUAGE PREFERENCE').id
    delivery_concept = Concept.find_by_name('TYPE OF MESSAGE').id
@@ -1673,8 +1828,8 @@ module Report
    date_ranges.map do |date_range|
 
      period_data = []
-     encounters_count = self.get_total_tips_encounters(date_range)
-     encounters = self.get_tips_data_by_name(date_range)
+     encounters_count = self.get_total_tips_encounters(date_range, district_id)
+     encounters = self.get_tips_data_by_name(date_range, district_id)
 
      encounters.group_by(&:patient_name).each do |name, data|
 
@@ -1717,7 +1872,7 @@ module Report
    
  end
 
- def self.get_total_tips_encounters(date_range)
+ def self.get_total_tips_encounters(date_range, district_id)
   encounter_type_list = ["TIPS AND REMINDERS"]
   encounter_types = self.get_encounter_types(encounter_type_list)
 
@@ -1731,21 +1886,26 @@ module Report
   encounters_list.count
  end
 
- def self.get_tips_data_by_name(date_range)
-
+ def self.get_tips_data_by_name(date_range, district_id)
+  
+  call_id = Concept.find_by_name("CALL ID").id
   encounter_type_list = ["TIPS AND REMINDERS"]
   encounter_types = self.get_encounter_types(encounter_type_list)
-
-   query = "SELECT CONCAT_WS(' ',pn.given_name, pn.family_name) AS patient_name, o.*
-            FROM obs o
-              INNER JOIN encounter e
-              ON e.encounter_id = o.encounter_id
-              LEFT JOIN person_name pn
-              ON e.patient_id = pn.person_id
-            WHERE e.encounter_datetime >= '#{date_range.first}' AND
-                  e.encounter_datetime <= '#{date_range.last}' AND
-                  e.voided = 0 AND
-                  e.encounter_type IN (#{encounter_types})"
+                 
+    query = "SELECT CONCAT_WS(' ',pn.given_name, pn.family_name) AS patient_name, o.* " +
+           "FROM obs o " +
+              "INNER JOIN encounter e " +
+                "ON e.encounter_id = o.encounter_id AND o.concept_id = #{call_id} " +
+              "INNER JOIN call_log cl " +
+                "ON o.value_text = cl.call_log_id " + 
+                  "AND cl.district = #{district_id} " + 
+              "LEFT JOIN person_name pn " +
+                "ON e.patient_id = pn.person_id " +
+            "WHERE  " +
+                  "e.encounter_datetime >= '#{date_range.first}' AND " +
+                  "e.encounter_datetime <= '#{date_range.last}' AND " +
+                  "e.encounter_type IN (#{encounter_types}) AND " + 
+                  "e.voided = 0 AND o.voided = 0 "
 =begin
   encounters_list = Encounter.find(:all,
                                    :joins => "LEFT JOIN person_attribute ON person_attribute.person_id = encounter.patient_id",
@@ -1803,5 +1963,265 @@ module Report
 
    relevant_date
  end
+ 
+ def self.family_planning_satisfaction(start_date, end_date, grouping, district)
+   
+    district_id = District.find_by_name(district).id
+    patients_data = []
+    date_ranges   = Report.generate_grouping_date_ranges(grouping, start_date, end_date)[:date_ranges]
 
+    date_ranges.map do |date_range|
+      total_callers = self.get_total_nonpregnant_callers(date_range.first, 
+                            date_range.last, 
+                            district_id).map(&:patient_id).uniq.count
+
+      query   = self.create_family_planning_query(date_range.first, date_range.last, district_id)
+      results = Patient.find_by_sql(query)
+      total_callers_on_family_planning = results.map(&:patient_id).uniq.count
+      
+      row_data = {:start_date => date_range.first,:end_date => date_range.last,
+                  :total_callers => total_callers,
+                  :total_callers_on_fp => total_callers_on_family_planning,
+                  :percentage_of_callers_on_fp => 0, :total_breakdown => 0,
+                  :pills => 0, :condoms => 0, :injectables => 0,
+                  :implants => 0, :other => 0,
+                  :percentage_of_satisfied_with_fpm => 0,
+                  :number_wanting_more_info => 0,
+                  :percentage_of_callers_wanting_info => 0
+            }
+            
+      results.each do |patient|
+        if patient.family_planning_satisfied_vc == 1065
+          birth_method = patient.birth_method_vt
+          if birth_method.blank?
+            birth_method = patient.birth_method_vc
+          end
+          
+          if birth_method == "Injectables"
+            row_data[:injectables] += 1
+          elsif birth_method == "Implants"
+            row_data[:implants] += 1
+          elsif birth_method == 190
+            row_data[:condoms] += 1
+          elsif birth_method == 13
+            row_data[:pills] += 1
+          else
+            row_data[:other] += 1
+          end
+        end
+        if patient.family_planning_info_vc == 1065
+          row_data[:number_wanting_more_info] += 1
+        end
+      end
+      row_data[:percentage_of_callers_on_fp] = ((row_data[:total_callers_on_fp].to_f / row_data[:total_callers].to_f) * 100).round(1) if row_data[:total_callers_on_fp] != 0
+      row_data[:total_breakdown] = row_data[:pills] + row_data[:condoms] + row_data[:other] + row_data[:injectables] + row_data[:implants]
+      row_data[:percentage_of_satisfied_with_fpm] = ((row_data[:total_breakdown].to_f / row_data[:total_callers_on_fp].to_f)* 100).round(1) if row_data[:total_breakdown] != 0
+      row_data[:percentage_of_callers_wanting_info] = ((row_data[:number_wanting_more_info].to_f / row_data[:total_callers].to_f) * 100).round(1) if row_data[:number_wanting_more_info] != 0
+      patients_data << row_data
+    end
+  #raise patients_data.to_yaml
+  return patients_data
+ end
+ 
+ def self.create_family_planning_query(start_date, end_date, district)
+#TODO - Remove the hard coding of the ids  
+   query = "select e.patient_id AS patient_id, obc.value_text AS call_id,
+           ofplan.value_coded_name_id AS family_planning_method_vcni, 
+           ofplan.value_coded AS family_planning_method_vc,
+           obmethod.value_coded_name_id AS birth_method_vcni, 
+           obmethod.value_coded AS birth_method_vc,
+           obmethod.value_text AS birth_method_vt,
+           ofsatisfied.value_coded_name_id AS family_planning_satisfied_vcni, 
+           ofsatisfied.value_coded AS family_planning_satisfied_vc,
+           ofinfo.value_coded_name_id AS family_planning_info_vcni, 
+           ofinfo.value_coded AS family_planning_info_vc
+        from encounter e
+            inner join obs ob on e.encounter_id = ob.encounter_id 
+                    and ob.concept_id = 5272 and ob.value_text = 'Not pregnant'
+            inner join obs obc on e.encounter_id = obc.encounter_id and obc.concept_id = 8304
+            inner join call_log cl on obc.value_text = cl.call_log_id and district = #{district}
+            inner join encounter efs on efs.encounter_type = 72 and efs.voided = 0
+            inner join obs ofs on efs.encounter_id = ofs.encounter_id
+                    and ofs.concept_id = 8304 and ofs.value_text = obc.value_text
+            inner join obs ofplan on ofplan.encounter_id = ofs.encounter_id and ofplan.concept_id = 1717
+            inner join obs obmethod on obmethod.encounter_id = ofs.encounter_id and obmethod.concept_id = 374
+            inner join obs ofsatisfied on ofsatisfied.encounter_id = ofs.encounter_id and ofsatisfied.concept_id = 9159
+            inner join obs ofinfo on ofinfo.encounter_id = ofs.encounter_id and ofinfo.concept_id = 9160
+            where
+                e.encounter_type = 111 
+                and e.voided = 0
+                and e.encounter_datetime >= '#{start_date}' and e.encounter_datetime <= '#{end_date}'"
+
+    return query
+ end
+
+ def self.get_total_nonpregnant_callers(start_date, end_date, district)
+    query = "select e.patient_id
+              from encounter e
+                inner join obs ob on e.encounter_id = ob.encounter_id 
+                        and ob.concept_id = 5272 and ob.value_text = 'Not pregnant'
+                inner join obs obc on e.encounter_id = obc.encounter_id and obc.concept_id = 8304
+                inner join call_log cl on obc.value_text = cl.call_log_id and district = #{district}
+              where
+                  e.encounter_type = 111 
+                  and e.voided = 0
+                  and e.encounter_datetime >= '#{start_date}' and e.encounter_datetime <= '#{end_date}'"
+    result = Patient.find_by_sql(query)
+    return result
+ end
+ def self.info_on_family_planning(start_date, end_date, grouping, district)
+   
+    district_id = District.find_by_name(district).id
+    patients_data = []
+    date_ranges   = Report.generate_grouping_date_ranges(grouping, start_date, end_date)[:date_ranges]
+
+    date_ranges.map do |date_range|
+      total_callers = self.get_total_nonpregnant_callers(date_range.first, 
+                            date_range.last, 
+                            district_id).map(&:patient_id).uniq.count
+
+      query   = self.create_family_planning_info_query(date_range.first, date_range.last, district_id)
+      results = Patient.find_by_sql(query)
+ 
+            row_data = {:start_date => date_range.first,:end_date => date_range.last,
+                  :total_callers => total_callers,
+                  :number_wanting_more_info => 0,
+                  :percentage_of_callers_wanting_info => 0
+            }
+            
+      results.each do |patient|
+        if patient.family_planning_info_vc == 1065
+          row_data[:number_wanting_more_info] += 1
+        end
+      end
+      row_data[:percentage_of_callers_wanting_info] = ((row_data[:number_wanting_more_info].to_f / row_data[:total_callers].to_f) * 100).round(1) if row_data[:number_wanting_more_info] != 0
+      patients_data << row_data
+    end
+  #raise patients_data.to_yaml
+  return patients_data
+ end
+ 
+ def self.create_family_planning_info_query(start_date, end_date, district)
+   query = "select e.patient_id AS patient_id, obc.value_text AS call_id,
+           ofplan.value_coded_name_id AS family_planning_method_vcni, 
+           ofplan.value_coded AS family_planning_method_vc,
+           ofinfo.value_coded_name_id AS family_planning_info_vcni, 
+           ofinfo.value_coded AS family_planning_info_vc
+        from encounter e
+            inner join obs ob on e.encounter_id = ob.encounter_id 
+                    and ob.concept_id = 5272 and ob.value_text = 'Not pregnant'
+            inner join obs obc on e.encounter_id = obc.encounter_id and obc.concept_id = 8304
+            inner join call_log cl on obc.value_text = cl.call_log_id and district = #{district}
+            inner join encounter efs on efs.encounter_type = 72 and efs.voided = 0
+            inner join obs ofs on efs.encounter_id = ofs.encounter_id
+                    and ofs.concept_id = 8304 and ofs.value_text = obc.value_text
+            inner join obs ofplan on ofplan.encounter_id = ofs.encounter_id and ofplan.concept_id = 1717
+            inner join obs ofinfo on ofinfo.encounter_id = ofs.encounter_id and ofinfo.concept_id = 9160
+            where
+                e.encounter_type = 111 
+                and e.voided = 0
+                and e.encounter_datetime >= '#{start_date}' and e.encounter_datetime <= '#{end_date}'"
+
+    return query
+ end
+
+ def self.get_nearest_health_centers(district)
+    district_id = district
+    hc_conditions = ["district = ?", district_id]
+
+    health_centers = HealthCenter.find(:all,:conditions => hc_conditions, :order => 'name') 
+    
+    return health_centers
+    
+ end
+ def self.new_vs_repeat_callers_report(start_date, end_date, grouping, district)
+    district_id = District.find_by_name(district).id
+    patients_data = []
+    date_ranges   = Report.generate_grouping_date_ranges(grouping, start_date, end_date)[:date_ranges]
+
+    date_ranges.map do |date_range|
+      row_data = {:start_date => date_range.first,:end_date => date_range.last,
+                  :total_calls => 0,
+                  :new_calls => 0,
+                  :new_calls_percentage => 0,
+                  :repeat_calls => 0,
+                  :repeat_calls_percentage => 0
+            }
+      
+      call_data = CallLog.find(:all,
+                               :conditions => ["district = ? AND start_time >= ?
+                                 AND start_time <= ?", district_id, date_range.first,
+                                 date_range.last])
+      row_data[:total_calls] = call_data.count
+      call_data.group_by(&:call_mode).each do |mode, call|
+        if mode == 1 #new call
+          row_data[:new_calls] = call.count 
+          row_data[:new_calls_percentage] = (row_data[:new_calls].to_f / row_data[:total_calls].to_f * 100).round(1) if row_data[:total_calls].to_f != 0
+        elsif mode == 2 #repeat call
+          row_data[:repeat_calls] = call.count 
+          row_data[:repeat_calls_percentage] = (row_data[:repeat_calls].to_f / row_data[:total_calls].to_f * 100).round(1) if row_data[:total_calls].to_f != 0
+        end 
+      end
+      
+      patients_data << row_data
+    end
+  #raise patients_data.to_yaml
+  return patients_data
+ end
+ def self.follow_up_report(start_date, end_date, grouping, district)
+   district_id = District.find_by_name(district).id
+   patients_data = []
+   #follow_up_reasons = self.create_follow_up_structure
+   date_ranges   = Report.generate_grouping_date_ranges(grouping, start_date, end_date)[:date_ranges]
+
+    date_ranges.map do |date_range|
+      
+      follow_ups = FollowUp.find(:all,
+                                 :conditions => ["district = ? AND date_created >= ?
+                                 AND date_created <= ?", district_id, date_range.first,
+                                 date_range.last])
+      new_follow_up_data                 = {}
+      new_follow_up_data[:reasons] = self.create_follow_up_structure
+      new_follow_up_data[:start_date]    = date_range.first
+      new_follow_up_data[:end_date]      = date_range.last
+      new_follow_up_data[:total_calls]   = follow_ups.count 
+      
+      new_follow_up_data[:reasons].each do |reason|
+        follow_ups.group_by(&:result).each do |result, data|
+          if result == reason[:reason_concept]
+            reason[:call_count] = data.count 
+            reason[:call_percentage] = (reason[:call_count].to_f / new_follow_up_data[:total_calls].to_f * 100).round(1) if new_follow_up_data[:total_calls].to_f != 0
+          end
+        end
+      end
+      patients_data.push(new_follow_up_data)
+      
+    end
+
+    return patients_data
+ end
+ 
+ def self.create_follow_up_structure
+   follow_up_map = []
+   
+   follow_up_reasons = [
+          ['Pregnant woman miscarried', 'Pregnant woman miscarried'],
+          ['Child died', 'Child dies'],
+          ['Client followed-up on referral and improved', 'Client followed-up on referral and improved'],
+          ['Client followed up on referral and did not improve', 'Client followed up on referral and did not improve'],
+          ['Client did not follow the referral advice and improved', 'Client did not follow the referral advice and improved'],
+          ['Client did not follow the referral advice and did not improve', 'Client did not follow the referral advice and did not improve'],
+          ['Client went to the health facility but was unable to get treatment', 'Client went to the health facility but was unable to get treatment'],
+          ['Client unable to follow-up on referral', 'Client unable to follow-up on referral'],
+          ['Client appreciates service', 'Client appreciates service'],
+          ['Other','OTHER']]
+   
+   follow_up_reasons.each do |reason|
+     mapping = {:reason_name  => reason.first,  :reason_concept => reason.last,
+                :call_count  => 0,    :call_percentage  => 0}
+    follow_up_map << mapping
+   end
+
+   return follow_up_map
+ end
 end

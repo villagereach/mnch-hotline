@@ -25,12 +25,12 @@
     <div>
     <fieldset class="main_fieldset">
       <legend class="main_legend" style="color:white; background-color:green;">
-        <%=@report_name +" - <i>"+ @patient_type +"</i>"%>
+        <%=@report_name %>
       </legend>
       <table cellspacing="0" width="100%">
           <tr>
             <td class="celltop cellleft cellbottom main-table-cell" style="font-weight: bold;">
-            <%= @health_task.humanize.titleize %>
+            <%= "Follow up Result".humanize.titleize %>
             </td>
             
             <td class="celltop cellleft cellbottom main-table-cell" style="font-weight: bold;">
@@ -44,13 +44,13 @@
           
         <%@report.reverse.map do |data|%>
           <tr>
-            <td width="25%" colspan = 3 class="cellleft cellbottom cellright main-table-cell" style="background-color:ddd; text-align:center;font-weight: bold; font-size: large; font-style: italic;">
+            <td width="25%" colspan = 3 class="cellleft cellbottom cellright main-table-cell" style="background-color:ddd; text-align:left;font-weight: bold; font-size: large; font-style: italic;">
               <%= @grouping.humanize + " beginning "+ data[:start_date] + " ending " + data[:end_date]%>
             </td>
           </tr>
           <tr>
             <td  class="cellleft cellbottom main-table-cell">
-                Total  <%= @patient_type %> Callers
+                Total Calls
             </td>
             <td  class="cellleft cellbottom main-table-cell">
               <%= data[:total_calls] %>
@@ -60,49 +60,23 @@
             </td>
           </tr>
           <tr>
-            <td  class="cellleft cellbottom main-table-cell">
-                Total <%= @patient_type %> Callers with <%= @health_task.humanize.titleize %>
-            </td>
-            <td  class="cellleft cellbottom main-table-cell">
-              <%= data[:total_number_of_calls] %>
-            </td>
-            <td  class="cellleft cellbottom cellright main-table-cell">
-              na
-            </td>
-          </tr>
-          <tr>
-            <td  class="cellleft cellbottom main-table-cell">
-                Total Calls for period
-            </td>
-            <td  class="cellleft cellbottom main-table-cell">
-              <%= data[:total_number_of_calls_for_period]%>
-            </td>
-            <td  class="cellleft cellbottom cellright main-table-cell">
-              na
-            </td>
-          </tr>
-          <tr>
-            <td width="25%" colspan = 3 class="cellleft cellbottom cellright main-table-cell" style="background-color:ddd; text-align:center;font-weight: bold; font-size: large; font-style: italic;">
-              Below are the <%=  @health_task.gsub(/_/, " ").capitalize %>
+            <td width="25%" colspan = 3 class="cellleft cellbottom cellright main-table-cell" style="background-color:ddd; text-align:left;font-weight: bold; font-size: large; font-style: italic;">
+              Below are the results
             </td>
           </tr>
           
-          <% data[:health_issues].map do | health_issue|%>
+          <% data[:reasons].map do |result|%>
           <tr>
             <td class="cellleft cellbottom main-table-cell">
-            <% concept = health_issue[:concept_name].to_s.sub("SIGN", "")%>
-            <% concept.sub("SYMPTOM","") %>
-            <% concept = concept == "GAINED OR LOST WEIGHT" ? "WEIGHT CHANGE" : concept %>
-            <% concept = concept == "ACUTE ABDOMINAL PAIN" ? "SEVERE ABDOMINAL PAIN" : concept %>
-            <%=concept.to_s.titleize %>
+                <%=result[:reason_name].titleize %>
             </td>
             
             <td class="cellleft cellbottom main-table-cell">
-            <%= health_issue[:call_count] %>
+                <%= result[:call_count] %>
             </td>
             
             <td class="cellleft cellbottom cellright main-table-cell">
-            <%= health_issue[:call_percentage] %>
+                <%= result[:call_percentage] %>
             </td>
           </tr>
           <% end %>

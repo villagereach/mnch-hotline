@@ -25,7 +25,10 @@ class ClinicController < ApplicationController
   end
 
   def reports
-    @reports = [["Patient Analysis","/report/type?q=patient_analysis"],["Tips","/report/type?q=tips"], ["Call Analysis", "/report/type?q=call_analysis"]]
+    @reports = [["Patient Analysis","/report/type?q=patient_analysis"],
+                ["Tips","/report/type?q=tips"], 
+                ["Call Analysis", "/report/type?q=call_analysis"],
+                ["Family Planning", "/report/type?q=family_planning"]]
     render :template => 'clinic/reports', :layout => 'clinic' 
   end
 
@@ -310,11 +313,15 @@ class ClinicController < ApplicationController
       log_call(3)
     end
     def district
-
-      session[:district] = params[:district]
-      session[:call_mode] = params[:call_mode]
       
-      render :template => 'clinic/home', :layout => 'clinic'
+      session[:district] = params[:district]
+      if ! params[:call_mode].nil?
+        session[:call_mode] = params[:call_mode]
+        
+        render :template => 'clinic/home', :layout => 'clinic'
+      else
+        showfollowuplist
+      end
     end
     def new_call
       call_home(params)
@@ -334,5 +341,60 @@ class ClinicController < ApplicationController
       end
       
       render :template => 'clinic/district', :layout => 'application'
+    end
+    
+    def showfollowuplist
+      district = session[:district]
+      @follow_ups = FollowUp.get_follow_ups(district)
+      
+      render :template => 'clinic/followuplist', :layout => 'application'
+    end
+    
+    def create_followup
+      
+      district_id = District.find_by_name(session[:district]).id
+      
+      follow_up = FollowUp.new
+      follow_up.patient_id = params[:patient_id]
+      follow_up.result = params[:result]
+      follow_up.creator = session[:user_id].to_i
+      follow_up.date_created = session[:datetime].to_date rescue Date.today
+      follow_up.district = district_id
+      
+      follow_up.save
+      
+      source = params[:source]
+      
+      if source == 'HK' #house keeping
+        redirect_to "/clinic/showfollowuplist"
+      else # initiated during the call -- redirect to patient_dashboard #source PD
+        redirect_to "/patients/show/#{params[:patient_id]}"
+      end
+    end
+    
+    def followup
+      @source = params[:source]
+      @patient = Patient.find(params[:person])
+      @referral_outcomes = follow_up_options
+      
+      render :template => 'clinic/newfollowup', :layout => 'application'
+    end
+    
+    def follow_up_options
+      select_options = {
+        'follow_up_options' => [
+          ['', ''],
+          ['Pregnant woman miscarried', 'Pregnant woman miscarried'],
+          ['Child died', 'Child dies'],
+          ['Client followed-up on referral and improved', 'Client followed-up on referral and improved'],
+          ['Client followed up on referral and did not improve', 'Client followed up on referral and did not improve'],
+          ['Client did not follow the referral advice and improved', 'Client did not follow the referral advice and improved'],
+          ['Client did not follow the referral advice and did not improve', 'Client did not follow the referral advice and did not improve'],
+          ['Client went to the health facility but was unable to get treatment', 'Client went to the health facility but was unable to get treatment'],
+          ['Client unable to follow-up on referral', 'Client unable to follow-up on referral'],
+          ['Client appreciates service', 'Client appreciates service'],
+          ['Other','OTHER']
+        ]
+      }
     end
 end
