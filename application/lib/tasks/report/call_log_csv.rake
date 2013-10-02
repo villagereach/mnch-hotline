@@ -5,42 +5,53 @@ require 'pry'
 F_DATE = '%Y-%m-%d'
 F_TIME = '%H:%M:%S'
 F_DATETIME = '%Y-%m-%d %H:%M:%S'
-REPORTS_DIR = File.join(Rails.root, 'tmp', 'reports')
+REPORTS_BASE_DIR = File.join(Rails.root, 'tmp', 'reports')
 
 FILENAME_DATE_FORMAT = '%B-%Y'
 
-def csv_reports_reporting_date_label(range_end)
-  if range_end
-    reporting_date = DateTime.parse(range_end)
-  else    
-    reporting_date = CallLog.last.start_time.to_date - 15.days  #second half of month = report on current
-  end
-  reporting_date.strftime(FILENAME_DATE_FORMAT)
+def find_previous_national_ids(end_date)
+  #WARN:  hardcoded ids.  nothing would be safe from a future data-dictionary update / migration.
+  # ruby shown is confirmation, but not necessarily unique.  
+  # national id type = 3 = PatientIdentifierType.find_by_name("National id").patient_identifier_type_id
+  # 'Yes' 'concept' for tips enrollment observation = 1065  = ConceptName.find_by_concept_id(1065)
+  # tips enrollment concept for observations = 8315  = ConceptName.find_by_name("ON TIPS AND REMINDERS PROGRAM").concept_id
+  # also note person_id == patient_id in openMRS
+  enrolled_patient_id_sql = "SELECT DISTINCT person_id FROM obs WHERE concept_id=8315 AND value_coded=1065 AND date_voided IS NULL AND obs_datetime < '#{end_date}'"
+  any_encounter_patient_id_sql = "SELECT DISTINCT patient_id FROM encounter WHERE date_voided IS NULL  AND encounter_datetime < '#{end_date}' "
+  
+  national_id_sql = "SELECT DISTINCT patient_identifier.identifier FROM patient_identifier WHERE identifier_type = 3 "
+  
+  
+  all_national_ids      = Patient.find_by_sql("#{national_id_sql} AND patient_id IN (#{any_encounter_patient_id_sql})").map(&:identifier)
+  enrolled_national_ids = Patient.find_by_sql("#{national_id_sql} AND patient_id IN (#{enrolled_patient_id_sql})").map(&:identifier)
+  
+  [all_national_ids, enrolled_national_ids]
 end
 
 namespace :report do  
   desc "call log CSV reports"
-  task :call_log_csv, [:start,:end] => :environment do |t,args|
-    range_start, range_end = [:start,:end].map do |d|
-      case args[d]
-      when 'nil',nil then nil
-      when /^(\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2}:\d{2})?)$/ then $1
-      when /^(\d{4}-\d{2})$/ then "#{$1}-01"
-      else
-        raise "invalid #{d}_date: #{args[d]} (format: YYYY-MM[-DD[ HH:MM:SS]] or nil)"
-      end
+  task :call_log_csv, [:month] => :environment do |t,args|
+    #intended to do one month of reporting. format is "2013-09" 
+    month = args[:month]
+    raise "reporting month needed.  use 'all' to report all data" if month.empty?
+    if month == "all"
+      end_date = CallLog.last.start_time.to_date + 1.day
+      reporting_date_label = "all-through-"+end_date.strftime(F_DATE)
+      relevant_calls = CallLog.find(:all)       
+      previous_all_ids, previous_enrollee_ids = [ [], [] ]
+    else
+      month_start = Date.parse(month+"-01")
+      next_month_start = month_start + 1.month
+      reporting_date_label = month_start.strftime(FILENAME_DATE_FORMAT)
+      relevant_calls = CallLog.find(:all, :conditions => "start_time >= '#{month_start}' AND start_time < '#{next_month_start}'")
+      previous_all_ids, previous_enrollee_ids = find_previous_national_ids(month_start)
     end
 
-    conditions = ""
-    conditions +=  "start_time >= '{DateTime.parse(range_start).to_s}'"  if range_start
-    conditions +=  "start_time <  '{DateTime.parse(range_end).to_s}'"    if range_end
-    conditions = nil if conditions.empty?
+    reports_dir = File.join(REPORTS_BASE_DIR, reporting_date_label)
 
-    reporting_date_label = csv_reports_reporting_date_label(range_end)
-
-
-    Dir.mkdir(REPORTS_DIR) unless File.directory?(REPORTS_DIR)
-    Dir.chdir(REPORTS_DIR)
+    Dir.mkdir(REPORTS_BASE_DIR) unless File.directory?(REPORTS_BASE_DIR)
+    Dir.mkdir(reports_dir) unless File.directory?(reports_dir)
+    Dir.chdir(reports_dir)
 
 
     call_log_reports = [
@@ -51,26 +62,20 @@ namespace :report do
       TipsAndRemindersCSV.new("Tips-and-Reminders-Activity", reporting_date_label),  #FIXME:  ensure this is monthly activity,  add ever-enrolled Participants separately.  (current enrollments from notifier)
     ]
     unique_reports = [
-      UniqueRegistrantCSV.new("Unique-Registrants", reporting_date_label),
-      UniqueEnrolleeCSV.new("Unique-Enrollees", reporting_date_label)
+      UniqueRegistrantCSV.new("Unique-Registrants", reporting_date_label, previous_all_ids),
+      UniqueEnrolleeCSV.new("Unique-Enrollees", reporting_date_label, previous_enrollee_ids)
     ]
 
-    if limit = ENV['MNCH_LIMIT'] 
-      order = ENV['MNCH_RAND'] ? 'rand()' : 'call_log.call_log_id ASC'
-      offset = ENV['MNCH_OFFSET'] || 0
-      all_calls = CallLog.find(:all, :conditions => conditions, :order=>order, :limit => limit, :offset=>offset)
-    else
-      all_calls = CallLog.find(:all, :conditions => conditions) 
-    end
-    puts "call count #{all_calls.size}"
 
-    all_calls.each_with_index do |call, idx|
-      puts "call #{idx}" if idx % 50 == 0
+    puts "relevant call count for #{reporting_date_label}:  #{relevant_calls.size}"
+
+    relevant_calls.each_with_index do |call, idx|
+      puts "call #{idx} #{call.start_time}" if idx % 50 == 0
       fc = FlattenedCall.new(call)
       call_log_reports.each {|r| r.write(fc) }
       unique_reports.each {|r| r.conditional_write(fc) }
     end
-
+ 
   end
 end
 
@@ -125,7 +130,7 @@ class EncounterCSV < FormattedCSV
   end
 
   def columns
-    [ 'CALL ID', 'CALL TYPE', 'CALL DROPPED', 'HAS ENCOUNTER', 'NATIONAL ID', 'DISTRICT', 'DISTRICT NAME', 'REPEAT CALLER', 'GENDER', 'DOB', 'VILLAGE', 'NEAREST HC',
+    [ 'CALL ID', 'CALL TYPE', 'CALL DROPPED', 'HAS ENCOUNTER', 'NATIONAL ID', 'DISTRICT', 'DISTRICT NAME', 'REPEAT CALLER', 'GENDER', 'DOB', 'VILLAGE', 'NEAREST HC', 'OCCUPATION',
       'PREGNANCY STATUS', 'EXPECTED DUE DATE', 'CALL DATE', 
     ]
   end
@@ -141,42 +146,10 @@ class EncounterCSV < FormattedCSV
 end
 
 
-class UniqueRegistrantCSV < EncounterCSV
-  def columns 
-    [ 'NATIONAL ID', 'DISTRICT', 'DISTRICT NAME', 'GENDER', 'DOB', 'VILLAGE', 'NEAREST HC', 'OCCUPATION', 'CALL DATE', 'CALL ID' ]
-  end
-
-  def initialize(filename, date_label)
-    super(filename, date_label)
-    @written_ids = []
-  end
-
-  def conditional_write(fc)
-    if !@written_ids.include?(fc.national_id)
-      write(fc)
-      @written_ids << fc.national_id
-    end
-  end
-end
-
-
-class UniqueEnrolleeCSV < UniqueRegistrantCSV
-  def columns 
-    super | [ 'NATIONAL ID', 'GENDER', 'DOB', 'VILLAGE', 'NEAREST HC', 'OCCUPATION', 'CALL DATE', 'CALL ID' ]    
-  end
-
-  def conditional_write(fc)
-    if fc.on_tips_and_reminders_program == 'Yes'
-      super(fc)
-    end
-  end
-end
-
-
 
 class CallDataCSV < EncounterCSV
   def columns
-    (super - ['HAS ENCOUNTER'])  | ['IVR ACCESS CODE', 'DATE CREATED', 'CELL PHONE', 'OCCUPATION', 'START TIME', 'END TIME', 'DURATION SEC', 'DURATION M:S']
+    (super - ['HAS ENCOUNTER'])  | ['DATE CREATED', 'CELL PHONE', 'OCCUPATION', 'START TIME', 'END TIME', 'DURATION SEC', 'DURATION M:S']
   end
 
   def column_definitions
@@ -199,6 +172,37 @@ class CallDataCSV < EncounterCSV
     "%d:%02d" % [seconds/60, seconds%60]
   end
 
+end
+
+
+
+class UniqueRegistrantCSV < CallDataCSV
+
+  def initialize(filename, date_label, initial_ids)
+    super(filename, date_label)
+    @written_ids = initial_ids
+  end
+
+  def conditional_write(fc)
+    if !@written_ids.include?(fc.national_id)
+      write(fc)
+      @written_ids << fc.national_id
+    end
+  end
+end
+
+
+class UniqueEnrolleeCSV < UniqueRegistrantCSV
+  def columns 
+    super | [ 'ON TIPS AND REMINDERS PROGRAM', 'TELEPHONE NUMBER', 'TELEPHONE NUMBER TYPE',
+      'TYPE OF MESSAGE', 'LANGUAGE PREFERENCE', 'TYPE OF MESSAGE CONTENT' ]    
+  end
+
+  def conditional_write(fc)
+    if fc.on_tips_and_reminders_program == 'Yes'
+      super(fc)
+    end
+  end
 end
 
 
