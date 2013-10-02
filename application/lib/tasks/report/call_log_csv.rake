@@ -1,6 +1,6 @@
 require 'csv'
 require 'delegate'
-require 'pry'
+#require 'pry'
 
 F_DATE = '%Y-%m-%d'
 F_TIME = '%H:%M:%S'
