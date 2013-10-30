@@ -1,6 +1,6 @@
 require 'csv'
 require 'delegate'
-#require 'pry'
+require 'pry'
 
 F_DATE = '%Y-%m-%d'
 F_TIME = '%H:%M:%S'
@@ -37,13 +37,15 @@ namespace :report do
     if month == "all"
       end_date = CallLog.last.start_time.to_date + 1.day
       reporting_date_label = "all-through-"+end_date.strftime(F_DATE)
-      relevant_calls = CallLog.find(:all)       
+      relevant_calls = CallLog.find(:all)      
+      relevant_followups = FollowUp.find(:all) 
       previous_all_ids, previous_enrollee_ids = [ [], [] ]
     else
       month_start = Date.parse(month+"-01")
       next_month_start = month_start + 1.month
       reporting_date_label = month_start.strftime(FILENAME_DATE_FORMAT)
       relevant_calls = CallLog.find(:all, :conditions => "start_time >= '#{month_start}' AND start_time < '#{next_month_start}'")
+      relevant_followups = FollowUp.find(:all, :conditions => "date_created >= '#{month_start}' AND date_created < '#{next_month_start}'")     
       previous_all_ids, previous_enrollee_ids = find_previous_national_ids(month_start)
     end
 
@@ -59,21 +61,31 @@ namespace :report do
       OutcomesCSV.new('Outcomes', reporting_date_label),
       ChildHealthSymptomsCSV.new("Child-Health", reporting_date_label),
       MaternalHealthSymptomsCSV.new("Maternal-Health", reporting_date_label),
-      TipsAndRemindersCSV.new("Tips-and-Reminders-Activity", reporting_date_label),  #FIXME:  ensure this is monthly activity,  add ever-enrolled Participants separately.  (current enrollments from notifier)
+      TipsAndRemindersCSV.new("Tips-and-Reminders-Activity", reporting_date_label),
     ]
     unique_reports = [
       UniqueRegistrantCSV.new("Unique-Registrants", reporting_date_label, previous_all_ids),
       UniqueEnrolleeCSV.new("Unique-Enrollees", reporting_date_label, previous_enrollee_ids)
     ]
 
-
     puts "relevant call count for #{reporting_date_label}:  #{relevant_calls.size}"
-
-    relevant_calls.each_with_index do |call, idx|
-      puts "call #{idx} #{call.start_time}" if idx % 50 == 0
-      fc = FlattenedCall.new(call)
-      call_log_reports.each {|r| r.write(fc) }
-      unique_reports.each {|r| r.conditional_write(fc) }
+    if ENV['CCPF_SKIP_CALLS']
+      puts "skipping due to ENV['CCPF_SKIP_CALLS']"
+    else
+      relevant_calls.each_with_index do |call, idx|
+        puts "call #{idx} #{call.start_time}" if idx % 50 == 0
+        fc = FlattenedCall.new(call)
+        call_log_reports.each {|r| r.write(fc) }
+        unique_reports.each {|r| r.conditional_write(fc) }
+      end
+    end
+    
+    followup_report = FollowupCSV.new("Followups", reporting_date_label)
+    puts "relevant followups:  #{relevant_followups.size}"
+    relevant_followups.each_with_index do |followup, idx|
+      puts "followup #{idx} #{followup.date_created}" if idx % 50 == 0
+      fc = FlattenedCall.new(followup)
+      followup_report.write(fc)
     end
  
   end
@@ -145,6 +157,21 @@ class EncounterCSV < FormattedCSV
   end
 end
 
+class FollowupCSV < FormattedCSV
+   def columns
+    [ 'NATIONAL ID', 'FOLLOWUP DISTRICT', 'FOLLOWUP DISTRICT NAME', 'GENDER', 'DOB', 'VILLAGE', 'NEAREST HC', 'OCCUPATION',
+      'FOLLOWUP DATE', 'FOLLOWUP RESULT'
+    ]
+  end
+
+  def column_definitions
+    { 'DOB'       => lambda {|v| v.try(:strftime, F_DATE) },
+    'FOLLOWUP DATE' => lambda { followup_time.try(:strftime, F_DATE) },
+    'FOLLOWUP DISTRICT NAME' => lambda { District.find(followup_district).name },
+    }
+  end
+end
+
 
 
 class CallDataCSV < EncounterCSV
@@ -212,7 +239,7 @@ class OutcomesCSV < EncounterCSV
   end
 
   def columns
-    super | ['OUTCOME', 'HEALTH FACILITY NAME', 'REASON FOR REFERRAL']
+    super | ['OUTCOME', 'HEALTH FACILITY NAME', 'REASON FOR REFERRAL', 'SECONDARY OUTCOME']
   end
 end
 
@@ -250,32 +277,26 @@ end
 class MaternalHealthSymptomsCSV < EncounterCSV
   # FIXME: refactor out the following concept names into Encounter model.
   # currently only available from within Encounter#health_symptoms_values.
-  MATERNAL_SYMPTOMS = [
-    'VAGINAL BLEEDING DURING PREGNANCY', 'POSTNATAL BLEEDING',
-    'FEVER DURING PREGNANCY SYMPTOM', 'POSTNATAL FEVER SYMPTOM', 'HEADACHES',
-    'FITS OR CONVULSIONS SYMPTOM', 'SWOLLEN HANDS OR FEET SYMPTOM',
-    'PALENESS OF THE SKIN AND TIREDNESS SYMPTOM',
-    'NO FETAL MOVEMENTS SYMPTOM', 'WATER BREAKS SYMPTOM'
-  ]
+  MATERNAL_SYMPTOMS = ["VAGINAL BLEEDING DURING PREGNANCY", "POSTNATAL BLEEDING", "FEVER DURING PREGNANCY SYMPTOM", "POSTNATAL FEVER SYMPTOM", "HEADACHES", "FITS OR CONVULSIONS SYMPTOM", "SWOLLEN HANDS OR FEET SYMPTOM", "PALENESS OF THE SKIN AND TIREDNESS SYMPTOM", "NO FETAL MOVEMENTS SYMPTOM", "WATER BREAKS SYMPTOM", "POSTNATAL DISCHARGE BAD SMELL", "ABDOMINAL PAIN", "PROBLEMS WITH MONTHLY PERIODS", "PROBLEMS WITH FAMILY PLANNING METHOD", "INFERTILITY", "FREQUENT MISCARRIAGES", "VAGINAL BLEEDING NOT DURING PREGNANCY", "VAGINAL ITCHING", "VAGINAL DISCHARGE", "OTHER",
+    "PATIENT USING FAMILY PLANNING", "METHOD OF FAMILY PLANNING", "SATISFIED WITH FAMILY PLANNING METHOD", "REQUIRE INFORMATION ON FAMILY PLANNING"]
+
   MATERNAL_SIGNS = [
     'HEAVY VAGINAL BLEEDING DURING PREGNANCY', 'EXCESSIVE POSTNATAL BLEEDING',
     'FEVER DURING PREGNANCY SIGN', 'POSTNATAL FEVER SIGN', 'SEVERE HEADACHE',
     'FITS OR CONVULSIONS SIGN', 'SWOLLEN HANDS OR FEET SIGN',
     'PALENESS OF THE SKIN AND TIREDNESS SIGN', 'NO FETAL MOVEMENTS SIGN',
-    'WATER BREAKS SIGN'
+    'WATER BREAKS SIGN', 'ACUTE ABDOMINAL PAIN'
   ]
-  MATERNAL_INFO = [
-    'HEALTHCARE VISITS', 'NUTRITION', 'BODY CHANGES', 'DISCOMFORT',
-    'CONCERNS', 'EMOTIONS', 'WARNING SIGNS', 'ROUTINES', 'BELIEFS',
-    'BABY\'S GROWTH', 'MILESTONES', 'PREVENTION'
-  ]
+  MATERNAL_INFO = ["HEALTHCARE VISITS", "NUTRITION", "BODY CHANGES", "DISCOMFORT", "CONCERNS", "EMOTIONS", "WARNING SIGNS", "ROUTINES", "BELIEFS", "BABY'S GROWTH", "MILESTONES", "PREVENTION", "FAMILY PLANNING", "BIRTH PLANNING MALE", "BIRTH PLANNING FEMALE", "OTHER"]
+
+  FAMILY_PLANNING = ["PATIENT USING FAMILY PLANNING","METHOD OF FAMILY PLANNING","SATISFIED WITH FAMILY PLANNING METHOD","REQUIRE INFORMATION ON FAMILY PLANNING"]
 
   def has_encounter
     @record.encounter_types.include?('MATERNAL HEALTH SYMPTOMS')
   end
 
   def columns
-    super | MATERNAL_SYMPTOMS | MATERNAL_SIGNS | MATERNAL_INFO
+    super | MATERNAL_SYMPTOMS | MATERNAL_SIGNS | MATERNAL_INFO | FAMILY_PLANNING
   end
 end
 
